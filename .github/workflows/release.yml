@@ -55,7 +55,7 @@ jobs:
           workspaces: './crates/rmeter-tauri -> ../../target'
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --legacy-peer-deps
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
