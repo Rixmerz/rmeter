@@ -154,6 +154,35 @@ An AI assistant can use the MCP tools to run a complete load test:
 7. run_test(plan_id)  → returns full test summary with statistics
 ```
 
+## Installation
+
+Download the latest release from [GitHub Releases](https://github.com/Rixmerz/rmeter/releases).
+
+| Platform | File |
+|----------|------|
+| **macOS (Apple Silicon)** | `rmeter_x.x.x_aarch64.dmg` |
+| **macOS (Intel)** | `rmeter_x.x.x_x64.dmg` |
+| **Linux (Debian/Ubuntu)** | `rmeter_x.x.x_amd64.deb` |
+| **Linux (Fedora/RHEL)** | `rmeter-x.x.x-1.x86_64.rpm` |
+| **Linux (AppImage)** | `rmeter_x.x.x_amd64.AppImage` |
+| **Windows** | `rmeter_x.x.x_x64-setup.exe` or `.msi` |
+
+### macOS: "App is damaged" warning
+
+macOS blocks unsigned apps downloaded from the internet. This is not a real corruption — the app is safe. To fix it, open Terminal and run:
+
+```bash
+# If you haven't opened the DMG yet:
+xattr -cr ~/Downloads/rmeter_*.dmg
+
+# If you already copied rmeter to Applications:
+xattr -cr /Applications/rmeter.app
+```
+
+Then open the app normally. This only needs to be done once.
+
+> **Why does this happen?** macOS Gatekeeper requires apps to be signed with an Apple Developer certificate ($99/year). rmeter is open-source and currently distributed unsigned. We may add code signing in the future.
+
 ## License
 
 [RLX Rixmerz License (RXL) v1.1](LICENSE) — Free core software with open ecosystem allowance.
