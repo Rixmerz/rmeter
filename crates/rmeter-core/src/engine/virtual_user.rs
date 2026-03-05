@@ -318,11 +318,11 @@ fn resolve_request_variables(
         .collect();
 
     let body = req.body.as_ref().map(|b| match b {
-        RequestBody::Json(s) => RequestBody::Json(substitute_variables(s, variables)),
-        RequestBody::Raw(s) => RequestBody::Raw(substitute_variables(s, variables)),
-        RequestBody::Xml(s) => RequestBody::Xml(substitute_variables(s, variables)),
-        RequestBody::FormData(pairs) => RequestBody::FormData(
-            pairs
+        RequestBody::Json { json } => RequestBody::Json { json: substitute_variables(json, variables) },
+        RequestBody::Raw { raw } => RequestBody::Raw { raw: substitute_variables(raw, variables) },
+        RequestBody::Xml { xml } => RequestBody::Xml { xml: substitute_variables(xml, variables) },
+        RequestBody::FormData { form_data } => RequestBody::FormData {
+            form_data: form_data
                 .iter()
                 .map(|(k, v)| {
                     (
@@ -331,7 +331,7 @@ fn resolve_request_variables(
                     )
                 })
                 .collect(),
-        ),
+        },
     });
 
     HttpRequest {
@@ -377,18 +377,18 @@ async fn build_and_send(
     // Apply body if present.
     if let Some(body) = &req.body {
         builder = match body {
-            RequestBody::Json(json_str) => {
-                let value: serde_json::Value = serde_json::from_str(json_str)
+            RequestBody::Json { json } => {
+                let value: serde_json::Value = serde_json::from_str(json)
                     .map_err(|e| format!("Invalid JSON body: {e}"))?;
                 builder.json(&value)
             }
-            RequestBody::FormData(pairs) => {
+            RequestBody::FormData { form_data } => {
                 let params: Vec<(&str, &str)> =
-                    pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                    form_data.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
                 builder.form(&params)
             }
-            RequestBody::Raw(raw) => builder.body(raw.clone()),
-            RequestBody::Xml(xml) => builder
+            RequestBody::Raw { raw } => builder.body(raw.clone()),
+            RequestBody::Xml { xml } => builder
                 .header("Content-Type", "application/xml")
                 .body(xml.clone()),
         };
@@ -507,13 +507,13 @@ mod tests {
     #[test]
     fn resolve_json_body_variables() {
         let mut req = make_request("http://example.com");
-        req.body = Some(RequestBody::Json(
-            "{\"name\": \"${user_name}\"}".to_string(),
-        ));
+        req.body = Some(RequestBody::Json {
+            json: "{\"name\": \"${user_name}\"}".to_string(),
+        });
         let vars = make_vars(&[("user_name", "Alice")]);
         let resolved = resolve_request_variables(&req, &vars);
         match &resolved.body {
-            Some(RequestBody::Json(s)) => {
+            Some(RequestBody::Json { json: s }) => {
                 assert_eq!(s, "{\"name\": \"Alice\"}");
             }
             _ => panic!("expected Json body"),
@@ -523,11 +523,11 @@ mod tests {
     #[test]
     fn resolve_raw_body_variables() {
         let mut req = make_request("http://example.com");
-        req.body = Some(RequestBody::Raw("Hello ${name}".to_string()));
+        req.body = Some(RequestBody::Raw { raw: "Hello ${name}".to_string() });
         let vars = make_vars(&[("name", "World")]);
         let resolved = resolve_request_variables(&req, &vars);
         match &resolved.body {
-            Some(RequestBody::Raw(s)) => assert_eq!(s, "Hello World"),
+            Some(RequestBody::Raw { raw: s }) => assert_eq!(s, "Hello World"),
             _ => panic!("expected Raw body"),
         }
     }
@@ -535,11 +535,11 @@ mod tests {
     #[test]
     fn resolve_xml_body_variables() {
         let mut req = make_request("http://example.com");
-        req.body = Some(RequestBody::Xml("<user>${user}</user>".to_string()));
+        req.body = Some(RequestBody::Xml { xml: "<user>${user}</user>".to_string() });
         let vars = make_vars(&[("user", "Bob")]);
         let resolved = resolve_request_variables(&req, &vars);
         match &resolved.body {
-            Some(RequestBody::Xml(s)) => assert_eq!(s, "<user>Bob</user>"),
+            Some(RequestBody::Xml { xml: s }) => assert_eq!(s, "<user>Bob</user>"),
             _ => panic!("expected Xml body"),
         }
     }
@@ -547,13 +547,13 @@ mod tests {
     #[test]
     fn resolve_form_data_variables() {
         let mut req = make_request("http://example.com");
-        req.body = Some(RequestBody::FormData(vec![
+        req.body = Some(RequestBody::FormData { form_data: vec![
             ("${key_var}".to_string(), "${val_var}".to_string()),
-        ]));
+        ]});
         let vars = make_vars(&[("key_var", "email"), ("val_var", "test@test.com")]);
         let resolved = resolve_request_variables(&req, &vars);
         match &resolved.body {
-            Some(RequestBody::FormData(pairs)) => {
+            Some(RequestBody::FormData { form_data: pairs }) => {
                 assert_eq!(pairs[0].0, "email");
                 assert_eq!(pairs[0].1, "test@test.com");
             }
@@ -601,7 +601,7 @@ mod tests {
         req.method = HttpMethod::Post;
         req.headers
             .insert("Content-Type".to_string(), "application/json".to_string());
-        req.body = Some(RequestBody::Json("{}".to_string()));
+        req.body = Some(RequestBody::Json { json: "{}".to_string() });
 
         let input = to_send_request_input(&req);
         assert_eq!(input.url, "http://example.com/api");

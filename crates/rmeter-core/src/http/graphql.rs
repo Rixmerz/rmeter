@@ -65,7 +65,7 @@ pub fn build_graphql_http_request(
         headers.insert(k.clone(), v.clone());
     }
 
-    Ok((endpoint_url.to_owned(), headers, RequestBody::Raw(body_str)))
+    Ok((endpoint_url.to_owned(), headers, RequestBody::Raw { raw: body_str }))
 }
 
 /// Build a [`crate::http::request::SendRequestInput`] for a GraphQL operation.
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(headers.get("Content-Type").map(String::as_str), Some("application/json"));
         assert_eq!(headers.get("Accept").map(String::as_str), Some("application/json"));
 
-        if let RequestBody::Raw(json_str) = body {
+        if let RequestBody::Raw { raw: json_str } = body {
             let v: serde_json::Value =
                 serde_json::from_str(&json_str).expect("body must be valid JSON");
             assert_eq!(v["query"], "{ users { id name } }");
@@ -205,7 +205,7 @@ mod tests {
             build_graphql_http_request("https://api.example.com/graphql", &gql, &HashMap::new())
                 .expect("build should succeed");
 
-        if let RequestBody::Raw(json_str) = body {
+        if let RequestBody::Raw { raw: json_str } = body {
             let v: serde_json::Value =
                 serde_json::from_str(&json_str).expect("body must be valid JSON");
             assert_eq!(v["variables"]["id"], "42");

@@ -1286,7 +1286,7 @@ mod tests {
             method: None,
             url: None,
             headers: None,
-            body: Some(Some(RequestBody::Raw("hello".to_string()))),
+            body: Some(Some(RequestBody::Raw { raw: "hello".to_string() })),
             enabled: None,
         };
         mgr.update_request(&plan_id, &group_id, &req_id, set_body).unwrap();

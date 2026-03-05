@@ -54,10 +54,11 @@ fn validate_request(req: &HttpRequest) -> Vec<RmeterError> {
         )));
     }
 
-    // Basic URL structure check — allow variable placeholders like {{base_url}}.
+    // Basic URL structure check — allow variable placeholders like {{base_url}} or ${base_url}.
     let url = req.url.trim();
     let expanded = url.replace("{{", "").replace("}}", "");
-    if !expanded.starts_with("http://") && !expanded.starts_with("https://") {
+    let has_dollar_var = url.starts_with("${") || expanded.starts_with("${");
+    if !has_dollar_var && !expanded.starts_with("http://") && !expanded.starts_with("https://") {
         errors.push(RmeterError::Validation(format!(
             "Request '{}': URL must start with http:// or https:// (got: {})",
             req.name, req.url
@@ -246,6 +247,24 @@ mod tests {
         // Also verify that "{{base_url}}" without scheme produces errors.
         let errors_bare = validate_plan(&plan);
         assert!(!errors_bare.is_empty());
+    }
+
+    #[test]
+    fn request_with_dollar_variable_url_is_valid() {
+        let req = make_valid_request("${base_url}/api/users");
+        let tg = make_valid_thread_group(vec![req]);
+        let plan = make_valid_plan("Plan", vec![tg]);
+        let errors = validate_plan(&plan);
+        assert!(errors.is_empty(), "Expected no errors for ${{base_url}} URL, got: {:?}", errors);
+    }
+
+    #[test]
+    fn request_with_dollar_variable_url_with_path_is_valid() {
+        let req = make_valid_request("${base_url}/v1/endpoint");
+        let tg = make_valid_thread_group(vec![req]);
+        let plan = make_valid_plan("Plan", vec![tg]);
+        let errors = validate_plan(&plan);
+        assert!(errors.is_empty(), "Expected no errors for ${{base_url}}/path URL, got: {:?}", errors);
     }
 
     #[test]

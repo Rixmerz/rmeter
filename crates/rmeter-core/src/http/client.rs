@@ -125,19 +125,19 @@ impl HttpClient {
         if let Some(body) = &input.body {
             use crate::plan::model::RequestBody;
             match body {
-                RequestBody::Json(json_str) => {
-                    let value: serde_json::Value = serde_json::from_str(json_str)?;
+                RequestBody::Json { json } => {
+                    let value: serde_json::Value = serde_json::from_str(json)?;
                     builder = builder.json(&value);
                 }
-                RequestBody::FormData(pairs) => {
+                RequestBody::FormData { form_data } => {
                     let params: Vec<(&str, &str)> =
-                        pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                        form_data.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
                     builder = builder.form(&params);
                 }
-                RequestBody::Raw(raw) => {
+                RequestBody::Raw { raw } => {
                     builder = builder.body(raw.clone());
                 }
-                RequestBody::Xml(xml) => {
+                RequestBody::Xml { xml } => {
                     builder = builder
                         .header("Content-Type", "application/xml")
                         .body(xml.clone());

@@ -41,13 +41,13 @@ impl std::fmt::Display for HttpMethod {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RequestBody {
     /// A JSON payload (stored as a raw JSON string for flexibility).
-    Json(String),
+    Json { json: String },
     /// URL-encoded form data as ordered key/value pairs.
-    FormData(Vec<(String, String)>),
+    FormData { form_data: Vec<(String, String)> },
     /// Arbitrary raw bytes/text body.
-    Raw(String),
+    Raw { raw: String },
     /// An XML payload.
-    Xml(String),
+    Xml { xml: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -378,21 +378,21 @@ mod tests {
 
     #[test]
     fn request_body_json_construction_and_match() {
-        let body = RequestBody::Json("{\"key\": \"value\"}".to_string());
+        let body = RequestBody::Json { json: "{\"key\": \"value\"}".to_string() };
         match body {
-            RequestBody::Json(s) => assert_eq!(s, "{\"key\": \"value\"}"),
+            RequestBody::Json { json: s } => assert_eq!(s, "{\"key\": \"value\"}"),
             _ => panic!("expected Json variant"),
         }
     }
 
     #[test]
     fn request_body_form_data_construction_and_match() {
-        let body = RequestBody::FormData(vec![
+        let body = RequestBody::FormData { form_data: vec![
             ("key1".to_string(), "val1".to_string()),
             ("key2".to_string(), "val2".to_string()),
-        ]);
+        ]};
         match body {
-            RequestBody::FormData(pairs) => {
+            RequestBody::FormData { form_data: pairs } => {
                 assert_eq!(pairs.len(), 2);
                 assert_eq!(pairs[0], ("key1".to_string(), "val1".to_string()));
             }
@@ -402,19 +402,32 @@ mod tests {
 
     #[test]
     fn request_body_raw_construction_and_match() {
-        let body = RequestBody::Raw("raw text body".to_string());
+        let body = RequestBody::Raw { raw: "raw text body".to_string() };
         match body {
-            RequestBody::Raw(s) => assert_eq!(s, "raw text body"),
+            RequestBody::Raw { raw: s } => assert_eq!(s, "raw text body"),
             _ => panic!("expected Raw variant"),
         }
     }
 
     #[test]
     fn request_body_xml_construction_and_match() {
-        let body = RequestBody::Xml("<root/>".to_string());
+        let body = RequestBody::Xml { xml: "<root/>".to_string() };
         match body {
-            RequestBody::Xml(s) => assert_eq!(s, "<root/>"),
+            RequestBody::Xml { xml: s } => assert_eq!(s, "<root/>"),
             _ => panic!("expected Xml variant"),
+        }
+    }
+
+    #[test]
+    fn request_body_json_serde_roundtrip() {
+        let body = RequestBody::Json { json: "{\"k\":1}".to_string() };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"type\":\"json\""));
+        assert!(json.contains("\"json\""));
+        let parsed: RequestBody = serde_json::from_str(&json).unwrap();
+        match parsed {
+            RequestBody::Json { json: s } => assert_eq!(s, "{\"k\":1}"),
+            _ => panic!("expected Json variant"),
         }
     }
 

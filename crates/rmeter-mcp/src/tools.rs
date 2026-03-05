@@ -297,7 +297,7 @@ fn add_request_def() -> ToolDefinition {
                 },
                 "body": {
                     "type": "object",
-                    "description": "Request body: {\"type\":\"json\",\"content\":\"...\"},  {\"type\":\"raw\",\"content\":\"...\"}, or {\"type\":\"xml\",\"content\":\"...\"}"
+                    "description": "Request body: {\"type\":\"json\",\"json\":\"...\"}, {\"type\":\"raw\",\"raw\":\"...\"}, {\"type\":\"xml\",\"xml\":\"...\"}, or {\"type\":\"form_data\",\"form_data\":[[\"key\",\"val\"]]}"
                 }
             },
             "required": ["plan_id", "group_id", "name"]
