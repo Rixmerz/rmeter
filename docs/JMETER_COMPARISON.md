@@ -327,7 +327,7 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 | Custom sampler development | Not yet | Yes (Java plugins) |
 | JMeter Plugins Manager | N/A | Yes |
 | Recording proxy | No | Yes (HTTP(S) Test Script Recorder) |
-| CLI (non-GUI) mode | MCP server (headless) | Yes (`jmeter -n -t test.jmx`) |
+| CLI (non-GUI) mode | Yes (`rmeter-cli run plan.rmeter`) + MCP server | Yes (`jmeter -n -t test.jmx`) |
 
 ---
 

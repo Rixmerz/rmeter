@@ -2,6 +2,7 @@
 members = [
     "crates/rmeter-core",
     "crates/rmeter-mcp",
+    "crates/rmeter-cli",
     "crates/rmeter-tauri",
 ]
 resolver = "2"
