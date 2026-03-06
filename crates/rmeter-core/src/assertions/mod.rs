@@ -1,5 +1,6 @@
 //! Assertion engine — evaluates HTTP response assertions during a test run.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -33,6 +34,8 @@ pub enum AssertionRule {
     HeaderEquals { header: String, expected: String },
     /// Assert that a response header contains a specific substring.
     HeaderContains { header: String, substring: String },
+    /// Assert that the response body matches a regular expression pattern.
+    BodyMatchesRegex { pattern: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +235,20 @@ pub fn evaluate_assertion(rule: &AssertionRule, ctx: &ResponseContext) -> (bool,
                     false,
                     format!("Header \"{}\" not found in response", header),
                 ),
+            }
+        }
+        AssertionRule::BodyMatchesRegex { pattern } => {
+            match Regex::new(pattern) {
+                Ok(re) => {
+                    let passed = re.is_match(ctx.body);
+                    let msg = if passed {
+                        format!("Body matches regex \"{}\"", pattern)
+                    } else {
+                        format!("Body does not match regex \"{}\"", pattern)
+                    };
+                    (passed, msg)
+                }
+                Err(e) => (false, format!("Invalid regex pattern \"{}\": {e}", pattern)),
             }
         }
     }
@@ -457,6 +474,55 @@ mod tests {
         assert!(!passed);
         assert!(msg.contains("not found"));
     }
+
+    // -----------------------------------------------------------------------
+    // BodyMatchesRegex
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn body_matches_regex_pass() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, r#"{"id": 12345, "status": "active"}"#, 50);
+        let rule = AssertionRule::BodyMatchesRegex { pattern: r#"id":\s*\d+"#.to_string() };
+        let (passed, _) = evaluate_assertion(&rule, &ctx);
+        assert!(passed);
+    }
+
+    #[test]
+    fn body_matches_regex_fail() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, "Hello World", 50);
+        let rule = AssertionRule::BodyMatchesRegex { pattern: r"^\d+$".to_string() };
+        let (passed, msg) = evaluate_assertion(&rule, &ctx);
+        assert!(!passed);
+        assert!(msg.contains("does not match"));
+    }
+
+    #[test]
+    fn body_matches_regex_invalid_pattern() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, "test", 50);
+        let rule = AssertionRule::BodyMatchesRegex { pattern: r"[invalid".to_string() };
+        let (passed, msg) = evaluate_assertion(&rule, &ctx);
+        assert!(!passed);
+        assert!(msg.contains("Invalid regex"));
+    }
+
+    #[test]
+    fn body_matches_regex_serde_roundtrip() {
+        let rule = AssertionRule::BodyMatchesRegex { pattern: r"\d{3}-\d{4}".to_string() };
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(json.contains("\"type\":\"body_matches_regex\""));
+        let parsed: AssertionRule = serde_json::from_str(&json).unwrap();
+        match parsed {
+            AssertionRule::BodyMatchesRegex { pattern } => assert_eq!(pattern, r"\d{3}-\d{4}"),
+            _ => panic!("expected BodyMatchesRegex"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // JsonPath
+    // -----------------------------------------------------------------------
 
     #[test]
     fn json_path_simple_key() {

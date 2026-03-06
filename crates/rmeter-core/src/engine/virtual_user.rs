@@ -7,10 +7,13 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use rand::Rng;
+
 use crate::engine::executor::CsvDataSet;
+use crate::extractors::functions::{self, FunctionContext};
 use crate::extractors::{evaluate_all as evaluate_extractors, ExtractionContext};
 use crate::http::request::SendRequestInput;
-use crate::plan::model::{HttpRequest, LoopCount};
+use crate::plan::model::{HttpRequest, LoopCount, TestElement, Timer};
 use crate::results::RequestResultEvent;
 
 // ---------------------------------------------------------------------------
@@ -31,33 +34,42 @@ use crate::results::RequestResultEvent;
 pub async fn run_virtual_user(
     user_id: u32,
     requests: Vec<HttpRequest>,
+    elements: Vec<TestElement>,
     client: Arc<reqwest::Client>,
     cancel: CancellationToken,
     result_tx: mpsc::Sender<RequestResultEvent>,
     plan_id: Uuid,
     thread_group_name: String,
     loop_count: LoopCount,
+    timer: Option<Timer>,
     variables: Arc<Mutex<HashMap<String, String>>>,
     csv_data_set: Arc<CsvDataSet>,
 ) {
+    let use_elements = !elements.is_empty();
+
+    macro_rules! run_once {
+        () => {
+            if use_elements {
+                execute_elements(
+                    &elements, &client, &cancel, &result_tx, plan_id,
+                    &thread_group_name, user_id, &timer, &variables, &csv_data_set,
+                ).await;
+            } else {
+                execute_request_sequence(
+                    &requests, &client, &cancel, &result_tx, plan_id,
+                    &thread_group_name, user_id, &timer, &variables, &csv_data_set,
+                ).await;
+            }
+        };
+    }
+
     match loop_count {
         LoopCount::Finite { count } => {
             for _ in 0..count {
                 if cancel.is_cancelled() {
                     return;
                 }
-                execute_request_sequence(
-                    &requests,
-                    &client,
-                    &cancel,
-                    &result_tx,
-                    plan_id,
-                    &thread_group_name,
-                    user_id,
-                    &variables,
-                    &csv_data_set,
-                )
-                .await;
+                run_once!();
             }
         }
         LoopCount::Duration { seconds } => {
@@ -66,36 +78,14 @@ pub async fn run_virtual_user(
                 if cancel.is_cancelled() {
                     return;
                 }
-                execute_request_sequence(
-                    &requests,
-                    &client,
-                    &cancel,
-                    &result_tx,
-                    plan_id,
-                    &thread_group_name,
-                    user_id,
-                    &variables,
-                    &csv_data_set,
-                )
-                .await;
+                run_once!();
             }
         }
         LoopCount::Infinite => loop {
             if cancel.is_cancelled() {
                 return;
             }
-            execute_request_sequence(
-                &requests,
-                &client,
-                &cancel,
-                &result_tx,
-                plan_id,
-                &thread_group_name,
-                user_id,
-                &variables,
-                &csv_data_set,
-            )
-            .await;
+            run_once!();
         },
     }
 }
@@ -114,7 +104,8 @@ async fn execute_request_sequence(
     result_tx: &mpsc::Sender<RequestResultEvent>,
     plan_id: Uuid,
     thread_group_name: &str,
-    _user_id: u32,
+    user_id: u32,
+    timer: &Option<Timer>,
     variables: &Arc<Mutex<HashMap<String, String>>>,
     csv_data_set: &CsvDataSet,
 ) {
@@ -137,11 +128,194 @@ async fn execute_request_sequence(
         }
 
         let event =
-            execute_single_request(req, client, plan_id, thread_group_name, variables).await;
+            execute_single_request(req, client, plan_id, thread_group_name, user_id, variables).await;
 
         // If the channel is closed (receiver dropped) just stop sending.
         if result_tx.send(event).await.is_err() {
             return;
+        }
+
+        // Apply think-time delay after each request if configured.
+        if let Some(ref t) = timer {
+            let delay_ms = compute_timer_delay(t);
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+        }
+    }
+}
+
+/// Execute a list of [`TestElement`]s, handling If/Loop/Transaction controllers
+/// recursively. This is the element-based counterpart to `execute_request_sequence`.
+#[allow(clippy::too_many_arguments)]
+async fn execute_elements(
+    elements: &[TestElement],
+    client: &Arc<reqwest::Client>,
+    cancel: &CancellationToken,
+    result_tx: &mpsc::Sender<RequestResultEvent>,
+    plan_id: Uuid,
+    thread_group_name: &str,
+    user_id: u32,
+    timer: &Option<Timer>,
+    variables: &Arc<Mutex<HashMap<String, String>>>,
+    csv_data_set: &CsvDataSet,
+) {
+    // Merge CSV row variables at the start of each iteration.
+    if !csv_data_set.is_empty() {
+        let csv_vars = csv_data_set.next_row();
+        if !csv_vars.is_empty() {
+            let mut vars = variables.lock().await;
+            vars.extend(csv_vars);
+        }
+    }
+
+    execute_elements_inner(
+        elements, client, cancel, result_tx, plan_id,
+        thread_group_name, user_id, timer, variables,
+    )
+    .await;
+}
+
+/// Recursive inner implementation for element execution.
+/// Uses `Box::pin` because recursive async functions require indirection.
+#[allow(clippy::too_many_arguments)]
+fn execute_elements_inner<'a>(
+    elements: &'a [TestElement],
+    client: &'a Arc<reqwest::Client>,
+    cancel: &'a CancellationToken,
+    result_tx: &'a mpsc::Sender<RequestResultEvent>,
+    plan_id: Uuid,
+    thread_group_name: &'a str,
+    user_id: u32,
+    timer: &'a Option<Timer>,
+    variables: &'a Arc<Mutex<HashMap<String, String>>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+        for element in elements {
+            if cancel.is_cancelled() {
+                return;
+            }
+
+            match element {
+                TestElement::Request { request } => {
+                    if !request.enabled {
+                        continue;
+                    }
+                    let event = execute_single_request(
+                        request, client, plan_id, thread_group_name, user_id, variables,
+                    )
+                    .await;
+                    if result_tx.send(event).await.is_err() {
+                        return;
+                    }
+                    // Apply think-time delay after each request.
+                    if let Some(ref t) = timer {
+                        let delay_ms = compute_timer_delay(t);
+                        if delay_ms > 0 {
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        }
+                    }
+                }
+                TestElement::IfController { condition, children, .. } => {
+                    let vars_snapshot = variables.lock().await.clone();
+                    if evaluate_condition(condition, &vars_snapshot) {
+                        execute_elements_inner(
+                            children, client, cancel, result_tx, plan_id,
+                            thread_group_name, user_id, timer, variables,
+                        )
+                        .await;
+                    }
+                }
+                TestElement::LoopController { count, children, .. } => {
+                    for _ in 0..*count {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        execute_elements_inner(
+                            children, client, cancel, result_tx, plan_id,
+                            thread_group_name, user_id, timer, variables,
+                        )
+                        .await;
+                    }
+                }
+                TestElement::TransactionController { name, children, .. } => {
+                    let tx_start = Instant::now();
+                    execute_elements_inner(
+                        children, client, cancel, result_tx, plan_id,
+                        thread_group_name, user_id, timer, variables,
+                    )
+                    .await;
+                    let tx_elapsed = tx_start.elapsed().as_millis() as u64;
+                    // Emit a synthetic result event for the transaction as a whole.
+                    let event = RequestResultEvent {
+                        id: Uuid::new_v4(),
+                        plan_id,
+                        thread_group_name: thread_group_name.to_string(),
+                        request_name: format!("TX: {}", name),
+                        timestamp: Utc::now(),
+                        status_code: 0,
+                        elapsed_ms: tx_elapsed,
+                        size_bytes: 0,
+                        assertions_passed: true,
+                        error: None,
+                        assertion_results: Vec::new(),
+                        extraction_results: Vec::new(),
+                        method: "TX".to_string(),
+                        url: String::new(),
+                        response_headers: HashMap::new(),
+                        response_body: None,
+                    };
+                    let _ = result_tx.send(event).await;
+                }
+            }
+        }
+    })
+}
+
+/// Evaluate a simple condition string against the current variable map.
+///
+/// Supported forms:
+/// - `${var} == "value"` — equality check
+/// - `${var} != "value"` — inequality check
+/// - `${var}` — truthy check (non-empty after substitution)
+fn evaluate_condition(condition: &str, variables: &HashMap<String, String>) -> bool {
+    let resolved = functions::substitute_all(condition, variables, None);
+
+    // Try == comparison
+    if let Some((left, right)) = resolved.split_once("==") {
+        let left = left.trim().trim_matches('"');
+        let right = right.trim().trim_matches('"');
+        return left == right;
+    }
+
+    // Try != comparison
+    if let Some((left, right)) = resolved.split_once("!=") {
+        let left = left.trim().trim_matches('"');
+        let right = right.trim().trim_matches('"');
+        return left != right;
+    }
+
+    // Truthy check: non-empty and not "false" / "0"
+    let trimmed = resolved.trim();
+    !trimmed.is_empty() && trimmed != "false" && trimmed != "0"
+}
+
+/// Compute the delay in milliseconds for a given timer configuration.
+fn compute_timer_delay(timer: &Timer) -> u64 {
+    match timer {
+        Timer::Constant { delay_ms } => *delay_ms,
+        Timer::UniformRandom { min_ms, max_ms } => {
+            if max_ms <= min_ms {
+                *min_ms
+            } else {
+                rand::thread_rng().gen_range(*min_ms..=*max_ms)
+            }
+        }
+        Timer::GaussianRandom { deviation_ms, offset_ms } => {
+            use rand::distributions::{Distribution, Standard};
+            let normal: f64 = Standard.sample(&mut rand::thread_rng());
+            let delay = *offset_ms as f64 + normal * *deviation_ms as f64;
+            delay.max(0.0) as u64
         }
     }
 }
@@ -173,6 +347,7 @@ async fn execute_single_request(
     client: &Arc<reqwest::Client>,
     plan_id: Uuid,
     thread_group_name: &str,
+    user_id: u32,
     variables: &Arc<Mutex<HashMap<String, String>>>,
 ) -> RequestResultEvent {
     let timestamp = Utc::now();
@@ -183,8 +358,14 @@ async fn execute_single_request(
         variables.lock().await.clone()
     };
 
-    // Apply variable substitution to all mutable request fields before sending.
-    let resolved_req = resolve_request_variables(req, &vars_snapshot);
+    // Build function context for built-in function evaluation.
+    let func_ctx = FunctionContext {
+        thread_num: user_id,
+        counter: functions::global_counter(),
+    };
+
+    // Apply variable substitution and built-in functions to all mutable request fields.
+    let resolved_req = resolve_request_variables(req, &vars_snapshot, Some(&func_ctx));
 
     // Build the reqwest request from the resolved plan model and send it.
     let result = build_and_send(&resolved_req, client).await;
@@ -300,36 +481,28 @@ async fn execute_single_request(
 fn resolve_request_variables(
     req: &HttpRequest,
     variables: &HashMap<String, String>,
+    func_ctx: Option<&FunctionContext>,
 ) -> HttpRequest {
-    use crate::extractors::substitute_variables;
     use crate::plan::model::RequestBody;
 
-    let url = substitute_variables(&req.url, variables);
+    let sub = |s: &str| functions::substitute_all(s, variables, func_ctx);
+
+    let url = sub(&req.url);
 
     let headers = req
         .headers
         .iter()
-        .map(|(k, v)| {
-            (
-                substitute_variables(k, variables),
-                substitute_variables(v, variables),
-            )
-        })
+        .map(|(k, v)| (sub(k), sub(v)))
         .collect();
 
     let body = req.body.as_ref().map(|b| match b {
-        RequestBody::Json { json } => RequestBody::Json { json: substitute_variables(json, variables) },
-        RequestBody::Raw { raw } => RequestBody::Raw { raw: substitute_variables(raw, variables) },
-        RequestBody::Xml { xml } => RequestBody::Xml { xml: substitute_variables(xml, variables) },
+        RequestBody::Json { json } => RequestBody::Json { json: sub(json) },
+        RequestBody::Raw { raw } => RequestBody::Raw { raw: sub(raw) },
+        RequestBody::Xml { xml } => RequestBody::Xml { xml: sub(xml) },
         RequestBody::FormData { form_data } => RequestBody::FormData {
             form_data: form_data
                 .iter()
-                .map(|(k, v)| {
-                    (
-                        substitute_variables(k, variables),
-                        substitute_variables(v, variables),
-                    )
-                })
+                .map(|(k, v)| (sub(k), sub(v)))
                 .collect(),
         },
     });
@@ -482,7 +655,7 @@ mod tests {
     fn resolve_url_variables() {
         let req = make_request("http://${host}/api/${version}/users");
         let vars = make_vars(&[("host", "example.com"), ("version", "v2")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         assert_eq!(resolved.url, "http://example.com/api/v2/users");
     }
 
@@ -490,7 +663,7 @@ mod tests {
     fn resolve_no_variables_keeps_url_unchanged() {
         let req = make_request("http://example.com/api");
         let vars = HashMap::new();
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         assert_eq!(resolved.url, "http://example.com/api");
     }
 
@@ -500,7 +673,7 @@ mod tests {
         req.headers
             .insert("Authorization".to_string(), "Bearer ${token}".to_string());
         let vars = make_vars(&[("token", "abc-123")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         assert_eq!(resolved.headers["Authorization"], "Bearer abc-123");
     }
 
@@ -511,7 +684,7 @@ mod tests {
             json: "{\"name\": \"${user_name}\"}".to_string(),
         });
         let vars = make_vars(&[("user_name", "Alice")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         match &resolved.body {
             Some(RequestBody::Json { json: s }) => {
                 assert_eq!(s, "{\"name\": \"Alice\"}");
@@ -525,7 +698,7 @@ mod tests {
         let mut req = make_request("http://example.com");
         req.body = Some(RequestBody::Raw { raw: "Hello ${name}".to_string() });
         let vars = make_vars(&[("name", "World")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         match &resolved.body {
             Some(RequestBody::Raw { raw: s }) => assert_eq!(s, "Hello World"),
             _ => panic!("expected Raw body"),
@@ -537,7 +710,7 @@ mod tests {
         let mut req = make_request("http://example.com");
         req.body = Some(RequestBody::Xml { xml: "<user>${user}</user>".to_string() });
         let vars = make_vars(&[("user", "Bob")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         match &resolved.body {
             Some(RequestBody::Xml { xml: s }) => assert_eq!(s, "<user>Bob</user>"),
             _ => panic!("expected Xml body"),
@@ -551,7 +724,7 @@ mod tests {
             ("${key_var}".to_string(), "${val_var}".to_string()),
         ]});
         let vars = make_vars(&[("key_var", "email"), ("val_var", "test@test.com")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         match &resolved.body {
             Some(RequestBody::FormData { form_data: pairs }) => {
                 assert_eq!(pairs[0].0, "email");
@@ -565,7 +738,7 @@ mod tests {
     fn resolve_preserves_id_and_name() {
         let req = make_request("http://example.com/${path}");
         let vars = make_vars(&[("path", "api")]);
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         assert_eq!(resolved.id, req.id);
         assert_eq!(resolved.name, req.name);
         assert_eq!(resolved.method, req.method);
@@ -576,7 +749,7 @@ mod tests {
     fn resolve_none_body_stays_none() {
         let req = make_request("http://example.com");
         let vars = HashMap::new();
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         assert!(resolved.body.is_none());
     }
 
@@ -584,11 +757,99 @@ mod tests {
     fn resolve_missing_variable_stays_as_placeholder() {
         let req = make_request("http://${missing_host}/api");
         let vars = HashMap::new();
-        let resolved = resolve_request_variables(&req, &vars);
+        let resolved = resolve_request_variables(&req, &vars, None);
         // The behavior depends on substitute_variables implementation
         // which keeps unresolved placeholders or removes them
         // Just verify it doesn't panic
         assert!(!resolved.url.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // evaluate_condition
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn condition_equality_pass() {
+        let vars = make_vars(&[("status", "ok")]);
+        assert!(evaluate_condition("${status} == \"ok\"", &vars));
+    }
+
+    #[test]
+    fn condition_equality_fail() {
+        let vars = make_vars(&[("status", "error")]);
+        assert!(!evaluate_condition("${status} == \"ok\"", &vars));
+    }
+
+    #[test]
+    fn condition_inequality_pass() {
+        let vars = make_vars(&[("status", "active")]);
+        assert!(evaluate_condition("${status} != \"inactive\"", &vars));
+    }
+
+    #[test]
+    fn condition_inequality_fail() {
+        let vars = make_vars(&[("status", "inactive")]);
+        assert!(!evaluate_condition("${status} != \"inactive\"", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_non_empty() {
+        let vars = make_vars(&[("token", "abc123")]);
+        assert!(evaluate_condition("${token}", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_empty_is_false() {
+        let vars = make_vars(&[("token", "")]);
+        assert!(!evaluate_condition("${token}", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_false_string_is_false() {
+        let vars = make_vars(&[("flag", "false")]);
+        assert!(!evaluate_condition("${flag}", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_zero_is_false() {
+        let vars = make_vars(&[("count", "0")]);
+        assert!(!evaluate_condition("${count}", &vars));
+    }
+
+    #[test]
+    fn condition_unresolved_var_stays_truthy() {
+        let vars = HashMap::new();
+        // ${missing} stays as literal "${missing}" which is non-empty
+        assert!(evaluate_condition("${missing}", &vars));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_timer_delay
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn timer_constant_delay() {
+        let timer = Timer::Constant { delay_ms: 250 };
+        assert_eq!(compute_timer_delay(&timer), 250);
+    }
+
+    #[test]
+    fn timer_uniform_random_in_range() {
+        let timer = Timer::UniformRandom { min_ms: 100, max_ms: 200 };
+        for _ in 0..50 {
+            let delay = compute_timer_delay(&timer);
+            assert!(delay >= 100 && delay <= 200, "delay {} not in [100, 200]", delay);
+        }
+    }
+
+    #[test]
+    fn timer_gaussian_random_is_non_negative() {
+        let timer = Timer::GaussianRandom { deviation_ms: 100, offset_ms: 500 };
+        for _ in 0..50 {
+            let delay = compute_timer_delay(&timer);
+            // Gaussian can go below offset but we clamp to 0
+            assert!(delay <= 2000, "delay {} seems unreasonably high", delay);
+        }
     }
 
     // -----------------------------------------------------------------------

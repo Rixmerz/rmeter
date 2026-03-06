@@ -1,6 +1,8 @@
 //! Extractor engine — evaluates response extractors during a test run and
 //! stores captured values into the variable map.
 
+pub mod functions;
+
 use std::collections::HashMap;
 
 use regex::Regex;

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::plan::model::{
     Assertion, CsvDataSource, CsvSharingMode, Extractor, HttpMethod, HttpRequest, LoopCount,
-    RequestBody, TestPlan, ThreadGroup, Variable, VariableScope,
+    RequestBody, TestPlan, ThreadGroup, ThreadGroupKind, Variable, VariableScope,
 };
 
 // ---------------------------------------------------------------------------
@@ -252,6 +252,7 @@ fn convert_jmx_tree(root: &XmlNode) -> Result<TestPlan, String> {
         variables,
         csv_data_sources,
         format_version: 1,
+        http_defaults: None,
     })
 }
 
@@ -389,7 +390,10 @@ fn parse_thread_group(
         ramp_up_seconds: ramp_up,
         loop_count,
         requests,
+        elements: Vec::new(),
         enabled,
+        timer: None,
+        kind: ThreadGroupKind::default(),
     }
 }
 

@@ -21,7 +21,8 @@ export type AssertionRule =
   | { type: "json_path"; expression: string; expected: unknown }
   | { type: "response_time_below"; threshold_ms: number }
   | { type: "header_equals"; header: string; expected: string }
-  | { type: "header_contains"; header: string; substring: string };
+  | { type: "header_contains"; header: string; substring: string }
+  | { type: "body_matches_regex"; pattern: string };
 
 // Assertion matching the Rust struct
 export interface Assertion {
@@ -64,6 +65,15 @@ export interface CsvDataSource {
   recycle: boolean;
 }
 
+// Timer variants matching the Rust enum
+export type Timer =
+  | { type: "constant"; delay_ms: number }
+  | { type: "uniform_random"; min_ms: number; max_ms: number }
+  | { type: "gaussian_random"; deviation_ms: number; offset_ms: number };
+
+// ThreadGroupKind matching the Rust enum
+export type ThreadGroupKind = "normal" | "set_up" | "tear_down";
+
 // HttpRequest matching the Rust struct (snake_case)
 export interface HttpRequest {
   id: string;
@@ -77,6 +87,30 @@ export interface HttpRequest {
   enabled: boolean;
 }
 
+// TestElement discriminated union matching the Rust enum
+export type TestElement =
+  | { type: "request" } & HttpRequest
+  | {
+      type: "if_controller";
+      id: string;
+      name: string;
+      condition: string;
+      children: TestElement[];
+    }
+  | {
+      type: "transaction_controller";
+      id: string;
+      name: string;
+      children: TestElement[];
+    }
+  | {
+      type: "loop_controller";
+      id: string;
+      name: string;
+      count: number;
+      children: TestElement[];
+    };
+
 // ThreadGroup matching the Rust struct (snake_case)
 export interface ThreadGroup {
   id: string;
@@ -85,7 +119,16 @@ export interface ThreadGroup {
   ramp_up_seconds: number;
   loop_count: LoopCount;
   requests: HttpRequest[];
+  elements: TestElement[];
   enabled: boolean;
+  timer?: Timer;
+  kind: ThreadGroupKind;
+}
+
+// HttpDefaults matching the Rust struct
+export interface HttpDefaults {
+  base_url?: string;
+  headers: Record<string, string>;
 }
 
 // TestPlan matching the Rust struct (snake_case)
@@ -97,6 +140,7 @@ export interface TestPlan {
   variables: Variable[];
   csv_data_sources: CsvDataSource[];
   format_version: number;
+  http_defaults?: HttpDefaults;
 }
 
 // PlanSummary returned by list_plans
@@ -114,6 +158,8 @@ export interface ThreadGroupUpdate {
   ramp_up_seconds?: number;
   loop_count?: LoopCount;
   enabled?: boolean;
+  timer?: Timer | null;
+  kind?: ThreadGroupKind;
 }
 
 export interface HttpRequestUpdate {

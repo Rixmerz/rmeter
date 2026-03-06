@@ -41,6 +41,9 @@ pub fn rest_api_test() -> TestPlan {
         loop_count: LoopCount::Finite { count: 1 },
         requests,
         enabled: true,
+        elements: Vec::new(),
+        timer: None,
+        kind: crate::plan::model::ThreadGroupKind::default(),
     };
 
     plan.thread_groups.push(tg);
@@ -68,6 +71,9 @@ pub fn load_test() -> TestPlan {
         loop_count: LoopCount::Duration { seconds: 60 },
         requests: vec![request],
         enabled: true,
+        elements: Vec::new(),
+        timer: None,
+        kind: crate::plan::model::ThreadGroupKind::default(),
     };
 
     plan.thread_groups.push(tg);
@@ -96,6 +102,9 @@ pub fn stress_test() -> TestPlan {
         loop_count: LoopCount::Duration { seconds: 120 },
         requests: vec![request],
         enabled: true,
+        elements: Vec::new(),
+        timer: None,
+        kind: crate::plan::model::ThreadGroupKind::default(),
     };
 
     plan.thread_groups.push(tg);
