@@ -13,7 +13,7 @@ use crate::engine::aggregator::StreamingAggregator;
 use crate::engine::virtual_user::run_virtual_user;
 use crate::engine::EngineStatus;
 use crate::error::RmeterError;
-use crate::plan::model::TestPlan;
+use crate::plan::model::{TestPlan, ThreadGroupKind};
 use crate::results::{RequestResultEvent, TestSummary};
 
 // ---------------------------------------------------------------------------
@@ -178,6 +178,7 @@ pub async fn run_test(config: EngineConfig) -> Result<EngineHandle, RmeterError>
     let plan_name = config.plan.name.clone();
     let plan_variables = config.plan.variables.clone();
     let csv_data_sources = config.plan.csv_data_sources.clone();
+    let http_defaults = config.plan.http_defaults.clone();
 
     // Spawn the main engine orchestrator.
     tokio::spawn(async move {
@@ -187,6 +188,7 @@ pub async fn run_test(config: EngineConfig) -> Result<EngineHandle, RmeterError>
             enabled_groups,
             plan_variables,
             csv_data_sources,
+            http_defaults,
             config.result_tx,
             cancel_token,
             status,
@@ -211,6 +213,7 @@ async fn execute_plan(
     thread_groups: Vec<crate::plan::model::ThreadGroup>,
     plan_variables: Vec<crate::plan::model::Variable>,
     csv_data_sources: Vec<crate::plan::model::CsvDataSource>,
+    http_defaults: Option<crate::plan::model::HttpDefaults>,
     result_tx: mpsc::Sender<EngineEvent>,
     cancel_token: CancellationToken,
     status: Arc<RwLock<EngineStatus>>,
@@ -255,15 +258,70 @@ async fn execute_plan(
     // Keep track of total spawned virtual users so we can report active_threads.
     let active_threads = Arc::new(std::sync::atomic::AtomicU32::new(0));
 
-    // Spawn all thread groups.
+    // Apply HTTP defaults to all request URLs and headers.
+    let thread_groups = if let Some(ref defaults) = http_defaults {
+        thread_groups.into_iter().map(|mut tg| {
+            tg.requests = tg.requests.into_iter().map(|mut req| {
+                // Prepend base_url to relative URLs.
+                if let Some(ref base) = defaults.base_url {
+                    if !req.url.starts_with("http://") && !req.url.starts_with("https://") && !req.url.starts_with("${") {
+                        req.url = format!("{}{}", base.trim_end_matches('/'), if req.url.starts_with('/') { "" } else { "/" }).to_string() + &req.url;
+                    }
+                }
+                // Merge default headers (request headers take precedence).
+                for (k, v) in &defaults.headers {
+                    req.headers.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+                req
+            }).collect();
+            tg
+        }).collect()
+    } else {
+        thread_groups
+    };
+
+    // Partition thread groups into setUp, normal, and tearDown.
+    let mut setup_groups = Vec::new();
+    let mut normal_groups = Vec::new();
+    let mut teardown_groups = Vec::new();
+    for tg in &thread_groups {
+        match tg.kind {
+            ThreadGroupKind::SetUp => setup_groups.push(tg.clone()),
+            ThreadGroupKind::Normal => normal_groups.push(tg.clone()),
+            ThreadGroupKind::TearDown => teardown_groups.push(tg.clone()),
+        }
+    }
+
+    // Run setUp thread groups first (wait for completion).
+    if !setup_groups.is_empty() {
+        let mut setup_join_set: JoinSet<()> = JoinSet::new();
+        for tg in setup_groups {
+            spawn_thread_group(
+                &mut setup_join_set,
+                plan_id,
+                tg,
+                &client,
+                &vu_tx,
+                &cancel_token,
+                &active_threads,
+                &shared_variables,
+                &csv_data_set,
+            );
+        }
+        while setup_join_set.join_next().await.is_some() {}
+    }
+
+    // Spawn all normal thread groups.
     let mut group_join_set: JoinSet<()> = JoinSet::new();
 
-    for tg in thread_groups {
+    for tg in normal_groups {
         let tg_name = tg.name.clone();
         let num_threads = tg.num_threads;
         let ramp_up_seconds = tg.ramp_up_seconds;
         let loop_count = tg.loop_count.clone();
         let requests = tg.requests.clone();
+        let elements = tg.elements.clone();
+        let timer = tg.timer.clone();
         let client = Arc::clone(&client);
         let vu_tx = vu_tx.clone();
         let cancel = cancel_token.clone();
@@ -279,6 +337,8 @@ async fn execute_plan(
                 ramp_up_seconds,
                 loop_count,
                 requests,
+                elements,
+                timer,
                 client,
                 vu_tx,
                 cancel,
@@ -342,6 +402,38 @@ async fn execute_plan(
     // Wait for all thread groups to fully exit.
     while group_join_set.join_next().await.is_some() {}
 
+    // Run tearDown thread groups (always, even after cancellation).
+    if !teardown_groups.is_empty() {
+        // Re-open a channel for tearDown results.
+        let (td_tx, mut td_rx) = mpsc::channel::<RequestResultEvent>(1024);
+        let mut td_join_set: JoinSet<()> = JoinSet::new();
+        let td_cancel = CancellationToken::new(); // fresh token — tearDown always runs
+        for tg in teardown_groups {
+            spawn_thread_group(
+                &mut td_join_set,
+                plan_id,
+                tg,
+                &client,
+                &td_tx,
+                &td_cancel,
+                &active_threads,
+                &shared_variables,
+                &csv_data_set,
+            );
+        }
+        drop(td_tx);
+        // Drain tearDown results into aggregator.
+        while let Some(event) = td_rx.recv().await {
+            let success = event.error.is_none();
+            {
+                let mut agg = aggregator.write().await;
+                agg.record(event.elapsed_ms, success, event.size_bytes);
+            }
+            let _ = result_tx.send(EngineEvent::RequestResult(event)).await;
+        }
+        while td_join_set.join_next().await.is_some() {}
+    }
+
     // Both normal completion and graceful cancellation produce the same status.
     let final_status = EngineStatus::Completed;
 
@@ -376,6 +468,8 @@ async fn run_thread_group(
     ramp_up_seconds: u32,
     loop_count: crate::plan::model::LoopCount,
     requests: Vec<crate::plan::model::HttpRequest>,
+    elements: Vec<crate::plan::model::TestElement>,
+    timer: Option<crate::plan::model::Timer>,
     client: Arc<reqwest::Client>,
     vu_tx: mpsc::Sender<RequestResultEvent>,
     cancel: CancellationToken,
@@ -416,8 +510,9 @@ async fn run_thread_group(
             .filter(|r| r.enabled)
             .cloned()
             .collect::<Vec<_>>();
+        let elements_clone = elements.clone();
 
-        if requests_clone.is_empty() {
+        if requests_clone.is_empty() && elements_clone.is_empty() {
             continue;
         }
 
@@ -426,6 +521,7 @@ async fn run_thread_group(
         let cancel_clone = cancel.clone();
         let tg_name_clone = tg_name.clone();
         let loop_count_clone = loop_count.clone();
+        let timer_clone = timer.clone();
         let active_clone = Arc::clone(&active_threads);
         let variables_clone = Arc::clone(&variables);
         let csv_clone = Arc::clone(&csv_data_set);
@@ -436,12 +532,14 @@ async fn run_thread_group(
             run_virtual_user(
                 user_id,
                 requests_clone,
+                elements_clone,
                 client_clone,
                 cancel_clone,
                 vu_tx_clone,
                 plan_id,
                 tg_name_clone,
                 loop_count_clone,
+                timer_clone,
                 variables_clone,
                 csv_clone,
             )
@@ -452,6 +550,57 @@ async fn run_thread_group(
 
     // Wait for all virtual users to finish.
     while vu_join_set.join_next().await.is_some() {}
+}
+
+// ---------------------------------------------------------------------------
+// Helper: spawn a thread group into a JoinSet
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_thread_group(
+    join_set: &mut JoinSet<()>,
+    plan_id: Uuid,
+    tg: crate::plan::model::ThreadGroup,
+    client: &Arc<reqwest::Client>,
+    vu_tx: &mpsc::Sender<RequestResultEvent>,
+    cancel: &CancellationToken,
+    active_threads: &Arc<std::sync::atomic::AtomicU32>,
+    variables: &Arc<Mutex<HashMap<String, String>>>,
+    csv_data_set: &Arc<CsvDataSet>,
+) {
+    let tg_name = tg.name.clone();
+    let num_threads = tg.num_threads;
+    let ramp_up_seconds = tg.ramp_up_seconds;
+    let loop_count = tg.loop_count.clone();
+    let requests = tg.requests.clone();
+    let elements = tg.elements.clone();
+    let timer = tg.timer.clone();
+    let client = Arc::clone(client);
+    let vu_tx = vu_tx.clone();
+    let cancel = cancel.clone();
+    let active = Arc::clone(active_threads);
+    let variables = Arc::clone(variables);
+    let csv = Arc::clone(csv_data_set);
+
+    join_set.spawn(async move {
+        run_thread_group(
+            plan_id,
+            tg_name,
+            num_threads,
+            ramp_up_seconds,
+            loop_count,
+            requests,
+            elements,
+            timer,
+            client,
+            vu_tx,
+            cancel,
+            active,
+            variables,
+            csv,
+        )
+        .await;
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::error::RmeterError;
 use crate::plan::model::{
     Assertion, Extractor, HttpMethod, HttpRequest, LoopCount, RequestBody, TestPlan, ThreadGroup,
-    Variable, VariableScope,
+    ThreadGroupKind, Timer, Variable, VariableScope,
 };
 
 // ---------------------------------------------------------------------------
@@ -20,6 +20,10 @@ pub struct ThreadGroupUpdate {
     pub ramp_up_seconds: Option<u32>,
     pub loop_count: Option<LoopCount>,
     pub enabled: Option<bool>,
+    /// Set a timer for think-time between requests. Use `Some(Some(timer))`
+    /// to set, `Some(None)` to clear, or `None` to leave unchanged.
+    pub timer: Option<Option<Timer>>,
+    pub kind: Option<ThreadGroupKind>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,7 +153,10 @@ impl PlanManager {
             ramp_up_seconds: 0,
             loop_count: LoopCount::default(),
             requests: Vec::new(),
+            elements: Vec::new(),
             enabled: true,
+            timer: None,
+            kind: ThreadGroupKind::default(),
         };
         let id = tg.id;
         plan.thread_groups.push(tg);
@@ -217,6 +224,12 @@ impl PlanManager {
         }
         if let Some(en) = update.enabled {
             tg.enabled = en;
+        }
+        if let Some(timer_opt) = update.timer {
+            tg.timer = timer_opt;
+        }
+        if let Some(kind) = update.kind {
+            tg.kind = kind;
         }
 
         // Re-borrow immutably to return a reference.
@@ -1184,6 +1197,8 @@ mod tests {
             ramp_up_seconds: None,
             loop_count: None,
             enabled: None,
+            timer: None,
+            kind: None,
         };
         let updated = mgr.update_thread_group(&plan_id, &group_id, update).unwrap();
         assert_eq!(updated.name, "New Name");
@@ -1201,6 +1216,8 @@ mod tests {
             ramp_up_seconds: None,
             loop_count: Some(LoopCount::Duration { seconds: 60 }),
             enabled: None,
+            timer: None,
+            kind: None,
         };
         let updated = mgr.update_thread_group(&plan_id, &group_id, update).unwrap();
         assert!(matches!(updated.loop_count, LoopCount::Duration { seconds: 60 }));

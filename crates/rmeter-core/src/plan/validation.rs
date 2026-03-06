@@ -101,7 +101,10 @@ mod tests {
             ramp_up_seconds: 2,
             loop_count: LoopCount::Finite { count: 10 },
             requests,
+            elements: Vec::new(),
             enabled: true,
+            timer: None,
+            kind: crate::plan::model::ThreadGroupKind::default(),
         }
     }
 
@@ -114,6 +117,7 @@ mod tests {
             variables: Vec::new(),
             csv_data_sources: Vec::new(),
             format_version: 1,
+            http_defaults: None,
         }
     }
 

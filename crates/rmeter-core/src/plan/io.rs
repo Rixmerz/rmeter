@@ -55,7 +55,10 @@ mod tests {
             ramp_up_seconds: 5,
             loop_count: LoopCount::Finite { count: 100 },
             requests: vec![req],
+            elements: Vec::new(),
             enabled: true,
+            timer: None,
+            kind: crate::plan::model::ThreadGroupKind::default(),
         };
 
         TestPlan {
@@ -66,6 +69,7 @@ mod tests {
             variables: Vec::new(),
             csv_data_sources: Vec::new(),
             format_version: 1,
+            http_defaults: None,
         }
     }
 

@@ -52,8 +52,8 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 | Stepping Thread Group | No | Yes (via plugin) |
 | Ultimate Thread Group | No | Yes (via plugin) |
 | Concurrency Thread Group | No | Yes (via plugin) |
-| setUp Thread Group | No | Yes |
-| tearDown Thread Group | No | Yes |
+| setUp Thread Group | Yes | Yes |
+| tearDown Thread Group | Yes | Yes |
 | Test Fragment | No | Yes |
 
 ---
@@ -112,7 +112,7 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 | Response Time assertion | Yes (threshold in ms) | Yes (Duration Assertion) |
 | Header Equals | Yes | Yes |
 | Header Contains | Yes | Yes |
-| Regex assertion | No (regex only in extractors) | Yes (Response Assertion with regex) |
+| Regex assertion | Yes (body_matches_regex) | Yes (Response Assertion with regex) |
 | XML/XPath assertion | No | Yes |
 | HTML assertion | No | Yes |
 | Size assertion | No | Yes |
@@ -151,9 +151,9 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 | Variable substitution in URLs | Yes | Yes |
 | Variable substitution in headers | Yes | Yes |
 | Variable substitution in body | Yes | Yes |
-| Built-in functions (`__Random`, `__time`, etc.) | No | Yes (50+ built-in functions) |
-| Counter element | No | Yes |
-| Random variable element | No | Yes |
+| Built-in functions (`__Random`, `__time`, etc.) | Yes (`__random`, `__randomString`, `__time`, `__uuid`, `__counter`, `__threadNum`, `__property`) | Yes (50+ built-in functions) |
+| Counter element | Yes (`__counter()` function) | Yes |
+| Random variable element | Yes (`__random()`, `__randomString()` functions) | Yes |
 | User Parameters | No | Yes |
 
 ---
@@ -162,16 +162,16 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 
 | Feature | rmeter | JMeter |
 |---------|--------|--------|
-| Constant Timer | No | Yes |
-| Gaussian Random Timer | No | Yes |
-| Uniform Random Timer | No | Yes |
+| Constant Timer | Yes | Yes |
+| Gaussian Random Timer | Yes | Yes |
+| Uniform Random Timer | Yes | Yes |
 | Poisson Random Timer | No | Yes |
 | Synchronizing Timer | No | Yes |
 | Constant Throughput Timer | No | Yes |
 | Precise Throughput Timer | No | Yes |
 | WebSocket Delay step | Yes (fixed ms delay in WS scenarios) | N/A |
 
-**Note:** rmeter does not currently have configurable timer/think-time elements between HTTP requests. Requests within a thread group execute sequentially without delays.
+**Note:** rmeter supports constant, gaussian random, and uniform random timers configured per thread group. Requests within a thread group execute sequentially with configurable think-time delays.
 
 ---
 
@@ -180,12 +180,12 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 | Feature | rmeter | JMeter |
 |---------|--------|--------|
 | Simple Controller | No | Yes |
-| Loop Controller | No (loop is at ThreadGroup level only) | Yes |
-| If Controller | No | Yes |
+| Loop Controller | Yes (nested, configurable count) | Yes |
+| If Controller | Yes (condition evaluation with `==`, `!=`, truthy) | Yes |
 | While Controller | No | Yes |
 | Switch Controller | No | Yes |
 | ForEach Controller | No | Yes |
-| Transaction Controller | No | Yes |
+| Transaction Controller | Yes (aggregate timing for grouped requests) | Yes |
 | Module Controller | No | Yes |
 | Include Controller | No | Yes |
 | Runtime Controller | No | Yes |
@@ -195,7 +195,7 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 | Once Only Controller | No | Yes |
 | Throughput Controller | No | Yes |
 
-**Note:** rmeter executes requests sequentially within a thread group. There are no nested logic controllers for branching or advanced flow control.
+**Note:** rmeter supports nested test elements with If, Loop, and Transaction controllers. Elements can be arbitrarily nested for complex flow control.
 
 ---
 
@@ -242,8 +242,8 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 
 | Feature | rmeter | JMeter |
 |---------|--------|--------|
-| HTTP Request Defaults | No | Yes |
-| HTTP Header Manager | No (headers set per-request) | Yes (shared defaults) |
+| HTTP Request Defaults | Yes (base_url + shared headers) | Yes |
+| HTTP Header Manager | Yes (via HTTP Defaults shared headers) | Yes (shared defaults) |
 | HTTP Cookie Manager | Automatic (reqwest) | Yes (configurable policies) |
 | HTTP Cache Manager | No | Yes |
 | HTTP Authorization Manager | Auth per-request | Yes (centralized) |
@@ -359,12 +359,12 @@ A detailed comparison of rmeter's current functionality against Apache JMeter 5.
 ## Summary of JMeter Strengths vs rmeter
 
 1. **Protocol breadth** — JDBC, LDAP, JMS, FTP, SMTP, TCP, and many more.
-2. **Logic controllers** — Full set of if/while/loop/switch/transaction controllers.
-3. **Timers** — Comprehensive think-time simulation (constant, gaussian, poisson, synchronizing, throughput).
+2. **Logic controllers** — Full set of while/switch/forEach/random/interleave/once-only controllers (rmeter covers if/loop/transaction).
+3. **Timers** — Additional timer types (poisson, synchronizing, throughput) beyond rmeter's constant/gaussian/uniform.
 4. **Scripting** — Groovy/JSR223 for custom logic anywhere in the test plan.
 5. **Plugin ecosystem** — Hundreds of community plugins via JMeter Plugins Manager.
 6. **Distributed testing** — Built-in remote agent architecture for scaling across machines.
 7. **Recording proxy** — Capture browser traffic and auto-generate test plans.
-8. **Built-in functions** — 50+ functions for data generation (`__Random`, `__time`, `__UUID`, etc.).
+8. **Built-in functions** — 50+ functions vs rmeter's 7 core functions.
 9. **Pre/post processors** — Extensive hooks before and after each request.
-10. **Configuration elements** — Centralized defaults, caching, and cookie policies.
+10. **Configuration elements** — Caching and advanced cookie policies.

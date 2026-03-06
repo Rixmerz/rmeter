@@ -1,5 +1,6 @@
 //! Assertion engine — evaluates HTTP response assertions during a test run.
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -29,6 +30,8 @@ pub enum AssertionRule {
     HeaderEquals { header: String, expected: String },
     /// Assert that a response header contains a specific substring.
     HeaderContains { header: String, substring: String },
+    /// Assert that the response body matches a regular expression pattern.
+    BodyMatchesRegex { pattern: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +191,20 @@ pub fn evaluate_assertion(rule: &AssertionRule, ctx: &ResponseContext) -> (bool,
                     false,
                     format!("Header \"{}\" not found in response", header),
                 ),
+            }
+        }
+        AssertionRule::BodyMatchesRegex { pattern } => {
+            match Regex::new(pattern) {
+                Ok(re) => {
+                    let passed = re.is_match(ctx.body);
+                    let msg = if passed {
+                        format!("Body matches regex \"{}\"", pattern)
+                    } else {
+                        format!("Body does not match regex \"{}\"", pattern)
+                    };
+                    (passed, msg)
+                }
+                Err(e) => (false, format!("Invalid regex pattern \"{}\": {e}", pattern)),
             }
         }
     }

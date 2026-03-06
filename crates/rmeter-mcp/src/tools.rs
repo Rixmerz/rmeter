@@ -56,6 +56,12 @@ pub fn all_tool_definitions() -> Vec<ToolDefinition> {
         add_extractor_def(),
         remove_extractor_def(),
         update_extractor_def(),
+        // Logic Controllers (elements)
+        add_element_def(),
+        remove_element_def(),
+        // HTTP Defaults
+        set_http_defaults_def(),
+        get_http_defaults_def(),
         // Engine
         run_test_def(),
         get_test_status_def(),
@@ -189,6 +195,15 @@ fn add_thread_group_def() -> ToolDefinition {
                             "enum": ["finite", "duration", "infinite"]
                         }
                     }
+                },
+                "timer": {
+                    "type": "object",
+                    "description": "Think-time delay after each request. Types: {\"type\":\"constant\",\"delay_ms\":N}, {\"type\":\"uniform_random\",\"min_ms\":N,\"max_ms\":N}, {\"type\":\"gaussian_random\",\"deviation_ms\":N,\"offset_ms\":N}. Use null to clear."
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Thread group execution order: 'normal' (default), 'set_up' (runs before main test), 'tear_down' (runs after main test)",
+                    "enum": ["normal", "set_up", "tear_down"]
                 }
             },
             "required": ["plan_id", "name"]
@@ -232,6 +247,14 @@ fn update_thread_group_def() -> ToolDefinition {
                 "enabled": {
                     "type": "boolean",
                     "description": "Enable or disable the thread group"
+                },
+                "timer": {
+                    "description": "Think-time delay after each request. Types: {\"type\":\"constant\",\"delay_ms\":N}, {\"type\":\"uniform_random\",\"min_ms\":N,\"max_ms\":N}, {\"type\":\"gaussian_random\",\"deviation_ms\":N,\"offset_ms\":N}. Use null to clear."
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Thread group execution order: 'normal', 'set_up', or 'tear_down'",
+                    "enum": ["normal", "set_up", "tear_down"]
                 }
             },
             "required": ["plan_id", "group_id"]
@@ -756,6 +779,110 @@ fn update_extractor_def() -> ToolDefinition {
     }
 }
 
+// ---------------------------------------------------------------------------
+// HTTP Defaults definitions
+// ---------------------------------------------------------------------------
+
+fn set_http_defaults_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "set_http_defaults".to_string(),
+        description: "Set shared HTTP defaults for a test plan. These are applied to all requests: base_url is prepended to relative URLs, and default headers are merged (request headers take precedence).".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "UUID of the test plan"
+                },
+                "base_url": {
+                    "type": "string",
+                    "description": "Base URL prepended to relative request URLs (e.g., 'https://api.example.com')"
+                },
+                "headers": {
+                    "type": "object",
+                    "description": "Default headers merged into every request",
+                    "additionalProperties": { "type": "string" }
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
+fn get_http_defaults_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "get_http_defaults".to_string(),
+        description: "Get the current HTTP defaults configured for a test plan.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "UUID of the test plan"
+                }
+            },
+            "required": ["plan_id"]
+        }),
+    }
+}
+
+fn add_element_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "add_element".to_string(),
+        description: "Add a test element (request, if_controller, loop_controller, or transaction_controller) to a thread group's elements list. Elements are executed in order and support nesting via children arrays. When elements are present, they are used instead of the flat requests list.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "UUID of the test plan"
+                },
+                "thread_group_id": {
+                    "type": "string",
+                    "description": "UUID of the thread group"
+                },
+                "element": {
+                    "type": "object",
+                    "description": "The test element to add. Must have a 'type' field: 'request', 'if_controller', 'loop_controller', or 'transaction_controller'.",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["request", "if_controller", "loop_controller", "transaction_controller"]
+                        }
+                    },
+                    "required": ["type"]
+                }
+            },
+            "required": ["plan_id", "thread_group_id", "element"]
+        }),
+    }
+}
+
+fn remove_element_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "remove_element".to_string(),
+        description: "Remove a test element from a thread group's elements list by its UUID (searches recursively through nested children).".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "plan_id": {
+                    "type": "string",
+                    "description": "UUID of the test plan"
+                },
+                "thread_group_id": {
+                    "type": "string",
+                    "description": "UUID of the thread group"
+                },
+                "element_id": {
+                    "type": "string",
+                    "description": "UUID of the element to remove"
+                }
+            },
+            "required": ["plan_id", "thread_group_id", "element_id"]
+        }),
+    }
+}
+
 fn run_test_def() -> ToolDefinition {
     ToolDefinition {
         name: "run_test".to_string(),
@@ -884,6 +1011,12 @@ pub async fn dispatch_tool(
         "add_extractor" => handle_add_extractor(args, state).await,
         "remove_extractor" => handle_remove_extractor(args, state).await,
         "update_extractor" => handle_update_extractor(args, state).await,
+        // Logic Controllers (elements)
+        "add_element" => handle_add_element(args, state).await,
+        "remove_element" => handle_remove_element(args, state).await,
+        // HTTP Defaults
+        "set_http_defaults" => handle_set_http_defaults(args, state).await,
+        "get_http_defaults" => handle_get_http_defaults(args, state).await,
         // Engine
         "run_test" => handle_run_test(args, state).await,
         "get_test_status" => handle_get_test_status(state).await,
@@ -1042,13 +1175,22 @@ async fn handle_add_thread_group(args: Value, state: &ToolState) -> ToolCallResu
         Err(e) => return tool_error(e.to_string()),
     };
 
-    if num_threads.is_some() || ramp_up_seconds.is_some() || loop_count.is_some() {
+    let timer: Option<Option<rmeter_core::plan::model::Timer>> = args.get("timer").map(|v| {
+        if v.is_null() { None } else { serde_json::from_value(v.clone()).ok() }
+    });
+    let kind: Option<rmeter_core::plan::model::ThreadGroupKind> = args.get("kind").and_then(|v| {
+        serde_json::from_value(v.clone()).ok()
+    });
+
+    if num_threads.is_some() || ramp_up_seconds.is_some() || loop_count.is_some() || timer.is_some() || kind.is_some() {
         let update = ThreadGroupUpdate {
             name: None,
             num_threads,
             ramp_up_seconds,
             loop_count,
             enabled: None,
+            timer,
+            kind,
         };
         if let Err(e) = mgr.update_thread_group(&plan_id, &group_id, update) {
             return tool_error(format!("Thread group created but update failed: {e}"));
@@ -1075,12 +1217,21 @@ async fn handle_update_thread_group(args: Value, state: &ToolState) -> ToolCallR
         Err(e) => return tool_error(e),
     };
 
+    let timer: Option<Option<rmeter_core::plan::model::Timer>> = args.get("timer").map(|v| {
+        if v.is_null() { None } else { serde_json::from_value(v.clone()).ok() }
+    });
+    let kind: Option<rmeter_core::plan::model::ThreadGroupKind> = args.get("kind").and_then(|v| {
+        serde_json::from_value(v.clone()).ok()
+    });
+
     let update = ThreadGroupUpdate {
         name: args.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
         num_threads: args.get("num_threads").and_then(|v| v.as_u64()).map(|v| v as u32),
         ramp_up_seconds: args.get("ramp_up_seconds").and_then(|v| v.as_u64()).map(|v| v as u32),
         loop_count: args.get("loop_count").and_then(|v| serde_json::from_value(v.clone()).ok()),
         enabled: args.get("enabled").and_then(|v| v.as_bool()),
+        timer,
+        kind,
     };
 
     let mut mgr = state.plan_manager.lock().await;
@@ -1542,6 +1693,161 @@ async fn handle_update_extractor(args: Value, state: &ToolState) -> ToolCallResu
     ) {
         Ok(extractor) => json_ok(&extractor),
         Err(e) => tool_error(e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Logic Controller (element) handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_add_element(args: Value, state: &ToolState) -> ToolCallResult {
+    let plan_id = match require_str(&args, "plan_id").and_then(|s| parse_uuid(s, "plan_id")) {
+        Ok(v) => v,
+        Err(e) => return tool_error(e),
+    };
+    let tg_id = match require_str(&args, "thread_group_id")
+        .and_then(|s| parse_uuid(s, "thread_group_id"))
+    {
+        Ok(v) => v,
+        Err(e) => return tool_error(e),
+    };
+
+    let element_val = match args.get("element") {
+        Some(v) => v.clone(),
+        None => return tool_error("Missing required argument: element".to_string()),
+    };
+
+    let element: rmeter_core::plan::model::TestElement =
+        match serde_json::from_value(element_val) {
+            Ok(e) => e,
+            Err(e) => return tool_error(format!("Invalid element: {e}")),
+        };
+
+    let mut mgr = state.plan_manager.lock().await;
+    match mgr.get_plan_mut(&plan_id) {
+        Some(plan) => {
+            match plan.thread_groups.iter_mut().find(|tg| tg.id == tg_id) {
+                Some(tg) => {
+                    tg.elements.push(element);
+                    json_ok(&tg.elements)
+                }
+                None => tool_error(format!("Thread group not found: {tg_id}")),
+            }
+        }
+        None => tool_error(format!("Plan not found: {plan_id}")),
+    }
+}
+
+async fn handle_remove_element(args: Value, state: &ToolState) -> ToolCallResult {
+    let plan_id = match require_str(&args, "plan_id").and_then(|s| parse_uuid(s, "plan_id")) {
+        Ok(v) => v,
+        Err(e) => return tool_error(e),
+    };
+    let tg_id = match require_str(&args, "thread_group_id")
+        .and_then(|s| parse_uuid(s, "thread_group_id"))
+    {
+        Ok(v) => v,
+        Err(e) => return tool_error(e),
+    };
+    let element_id =
+        match require_str(&args, "element_id").and_then(|s| parse_uuid(s, "element_id")) {
+            Ok(v) => v,
+            Err(e) => return tool_error(e),
+        };
+
+    let mut mgr = state.plan_manager.lock().await;
+    match mgr.get_plan_mut(&plan_id) {
+        Some(plan) => {
+            match plan.thread_groups.iter_mut().find(|tg| tg.id == tg_id) {
+                Some(tg) => {
+                    if remove_element_recursive(&mut tg.elements, element_id) {
+                        json_ok(&tg.elements)
+                    } else {
+                        tool_error(format!("Element not found: {element_id}"))
+                    }
+                }
+                None => tool_error(format!("Thread group not found: {tg_id}")),
+            }
+        }
+        None => tool_error(format!("Plan not found: {plan_id}")),
+    }
+}
+
+/// Recursively search and remove an element by ID from a nested element tree.
+fn remove_element_recursive(
+    elements: &mut Vec<rmeter_core::plan::model::TestElement>,
+    target_id: Uuid,
+) -> bool {
+    use rmeter_core::plan::model::TestElement;
+
+    // First check top-level
+    if let Some(idx) = elements.iter().position(|e| match e {
+        TestElement::Request { request } => request.id == target_id,
+        TestElement::IfController { id, .. }
+        | TestElement::TransactionController { id, .. }
+        | TestElement::LoopController { id, .. } => *id == target_id,
+    }) {
+        elements.remove(idx);
+        return true;
+    }
+
+    // Then recurse into children
+    for element in elements.iter_mut() {
+        let children = match element {
+            TestElement::IfController { children, .. }
+            | TestElement::TransactionController { children, .. }
+            | TestElement::LoopController { children, .. } => children,
+            TestElement::Request { .. } => continue,
+        };
+        if remove_element_recursive(children, target_id) {
+            return true;
+        }
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// HTTP Defaults handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_set_http_defaults(args: Value, state: &ToolState) -> ToolCallResult {
+    let plan_id = match require_str(&args, "plan_id").and_then(|s| parse_uuid(s, "plan_id")) {
+        Ok(v) => v,
+        Err(e) => return tool_error(e),
+    };
+
+    let base_url = args.get("base_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let headers: std::collections::HashMap<String, String> = args
+        .get("headers")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let defaults = rmeter_core::plan::model::HttpDefaults {
+        base_url,
+        headers,
+    };
+
+    let mut mgr = state.plan_manager.lock().await;
+    match mgr.get_plan_mut(&plan_id) {
+        Some(plan) => {
+            plan.http_defaults = Some(defaults);
+            json_ok(&plan.http_defaults)
+        }
+        None => tool_error(format!("Plan not found: {plan_id}")),
+    }
+}
+
+async fn handle_get_http_defaults(args: Value, state: &ToolState) -> ToolCallResult {
+    let plan_id = match require_str(&args, "plan_id").and_then(|s| parse_uuid(s, "plan_id")) {
+        Ok(v) => v,
+        Err(e) => return tool_error(e),
+    };
+
+    let mgr = state.plan_manager.lock().await;
+    match mgr.get_plan(&plan_id) {
+        Some(plan) => json_ok(&plan.http_defaults),
+        None => tool_error(format!("Plan not found: {plan_id}")),
     }
 }
 

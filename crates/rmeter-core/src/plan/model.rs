@@ -225,6 +225,77 @@ pub struct CsvDataSource {
 }
 
 // ---------------------------------------------------------------------------
+// Timer
+// ---------------------------------------------------------------------------
+
+/// A configurable delay applied between HTTP requests within a thread group
+/// to simulate user think-time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Timer {
+    /// Fixed delay after each request.
+    Constant { delay_ms: u64 },
+    /// Random delay uniformly distributed between min and max (inclusive).
+    UniformRandom { min_ms: u64, max_ms: u64 },
+    /// Random delay using gaussian distribution around a target offset.
+    GaussianRandom { deviation_ms: u64, offset_ms: u64 },
+}
+
+// ---------------------------------------------------------------------------
+// ThreadGroupKind
+// ---------------------------------------------------------------------------
+
+/// Controls when a thread group executes relative to the main test.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadGroupKind {
+    /// Normal thread group — runs during the main test phase.
+    #[default]
+    Normal,
+    /// setUp thread group — runs before all normal groups.
+    SetUp,
+    /// tearDown thread group — runs after all normal groups complete.
+    TearDown,
+}
+
+// ---------------------------------------------------------------------------
+// TestElement — tree structure for logic controllers
+// ---------------------------------------------------------------------------
+
+/// A node in the test execution tree. Enables logic controllers alongside
+/// plain HTTP requests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TestElement {
+    /// A single HTTP request (leaf node).
+    Request {
+        #[serde(flatten)]
+        request: HttpRequest,
+    },
+    /// Execute children only if condition evaluates to true.
+    /// Condition syntax: `"${var}" == "value"` or `"${var}" != "value"` or `"${var}"` (truthy).
+    IfController {
+        id: Uuid,
+        name: String,
+        condition: String,
+        children: Vec<TestElement>,
+    },
+    /// Group children under a named transaction for aggregate timing.
+    TransactionController {
+        id: Uuid,
+        name: String,
+        children: Vec<TestElement>,
+    },
+    /// Repeat children N times.
+    LoopController {
+        id: Uuid,
+        name: String,
+        count: u64,
+        children: Vec<TestElement>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // ThreadGroup
 // ---------------------------------------------------------------------------
 
@@ -239,10 +310,39 @@ pub struct ThreadGroup {
     pub ramp_up_seconds: u32,
     #[serde(default)]
     pub loop_count: LoopCount,
+    /// Flat list of HTTP requests (backward-compatible). If `elements` is
+    /// non-empty, this field is ignored by the engine.
     #[serde(default)]
     pub requests: Vec<HttpRequest>,
+    /// Tree of test elements (requests + logic controllers). When non-empty,
+    /// the engine uses this instead of `requests`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<TestElement>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Optional think-time timer applied after each request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer: Option<Timer>,
+    /// Controls execution order (setUp / normal / tearDown).
+    #[serde(default)]
+    pub kind: ThreadGroupKind,
+}
+
+// ---------------------------------------------------------------------------
+// HttpDefaults
+// ---------------------------------------------------------------------------
+
+/// Shared HTTP request defaults applied to all requests in a test plan.
+/// Individual request settings take precedence over defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HttpDefaults {
+    /// Base URL prepended to relative request URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Default headers merged into every request (request headers take precedence).
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +365,9 @@ pub struct TestPlan {
     /// Format version for forward-compatibility.
     #[serde(default = "default_format_version")]
     pub format_version: u32,
+    /// Shared HTTP defaults applied to all requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_defaults: Option<HttpDefaults>,
 }
 
 fn default_format_version() -> u32 {
@@ -281,6 +384,7 @@ impl TestPlan {
             variables: Vec::new(),
             csv_data_sources: Vec::new(),
             format_version: 1,
+            http_defaults: None,
         }
     }
 }
@@ -545,7 +649,10 @@ mod tests {
                 extractors: Vec::new(),
                 enabled: true,
             }],
+            elements: Vec::new(),
             enabled: true,
+            timer: None,
+            kind: ThreadGroupKind::default(),
         });
 
         let json = serde_json::to_string_pretty(&plan).unwrap();
@@ -612,7 +719,10 @@ mod tests {
             ramp_up_seconds: 30,
             loop_count: LoopCount::Infinite,
             requests: Vec::new(),
+            elements: Vec::new(),
             enabled: true,
+            timer: None,
+            kind: ThreadGroupKind::default(),
         };
         let json = serde_json::to_string(&tg).unwrap();
         let parsed: ThreadGroup = serde_json::from_str(&json).unwrap();
