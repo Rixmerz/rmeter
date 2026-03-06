@@ -7,7 +7,11 @@ import { PlanList } from "@/components/plan/PlanList";
 import { PlanTree } from "@/components/plan/PlanTree";
 import { PlanProperties } from "@/components/plan/PlanProperties";
 
-const RMETER_FILTER = [{ name: "rmeter plan", extensions: ["rmeter"] as string[] }];
+const PLAN_FILTERS = [
+  { name: "Test Plans", extensions: ["rmeter", "jmx"] as string[] },
+  { name: "rmeter plan", extensions: ["rmeter"] as string[] },
+  { name: "JMeter plan", extensions: ["jmx"] as string[] },
+];
 
 export function TestPlansPage() {
   const { activePlan, loading, savePlan, loadPlanFromFile, loadPlans } = usePlanStore();
@@ -20,7 +24,7 @@ export function TestPlansPage() {
   async function handleSave() {
     if (!activePlan) return;
     const path = await save({
-      filters: [...RMETER_FILTER],
+      filters: [...PLAN_FILTERS],
       defaultPath: `${activePlan.name}.rmeter`,
     });
     if (path) {
@@ -31,7 +35,7 @@ export function TestPlansPage() {
   async function handleSaveAs() {
     if (!activePlan) return;
     const path = await save({
-      filters: [...RMETER_FILTER],
+      filters: [...PLAN_FILTERS],
     });
     if (path) {
       await savePlan(path);
@@ -40,7 +44,7 @@ export function TestPlansPage() {
 
   async function handleLoad() {
     const path = await open({
-      filters: [...RMETER_FILTER],
+      filters: [...PLAN_FILTERS],
       multiple: false,
     });
     if (typeof path === "string") {
