@@ -1,4 +1,5 @@
 pub mod io;
+pub mod jmx;
 pub mod manager;
 pub mod model;
 pub mod templates;
