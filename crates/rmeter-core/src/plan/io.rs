@@ -1,15 +1,28 @@
 use std::path::Path;
 
 use crate::error::RmeterError;
+use crate::plan::jmx;
 use crate::plan::model::TestPlan;
 
-/// Read a `.rmeter` plan file from disk.
+/// Read a test plan from disk.
 ///
-/// The file format is JSON serialized [`TestPlan`].
+/// Supports both `.rmeter` (JSON) and `.jmx` (JMeter XML) file formats.
+/// The format is detected by file extension.
 pub async fn read_plan(path: impl AsRef<Path>) -> Result<TestPlan, RmeterError> {
-    let content = tokio::fs::read_to_string(path.as_ref()).await?;
-    let plan: TestPlan = serde_json::from_str(&content)?;
-    Ok(plan)
+    let path = path.as_ref();
+    let content = tokio::fs::read_to_string(path).await?;
+
+    let is_jmx = path
+        .extension()
+        .map(|ext| ext.eq_ignore_ascii_case("jmx"))
+        .unwrap_or(false);
+
+    if is_jmx {
+        jmx::parse_jmx(&content).map_err(|e| RmeterError::Validation(format!("JMX parse error: {e}")))
+    } else {
+        let plan: TestPlan = serde_json::from_str(&content)?;
+        Ok(plan)
+    }
 }
 
 /// Write a [`TestPlan`] to a `.rmeter` file on disk.
@@ -129,6 +142,46 @@ mod tests {
         let content = tokio::fs::read_to_string(&path).await.expect("file should be readable");
         assert!(content.contains(&plan.name));
         assert!(content.contains("thread_groups"));
+    }
+
+    #[tokio::test]
+    async fn read_plan_jmx_file() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("test.jmx");
+        let jmx_content = r#"<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="JMX IO Test">
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Workers">
+        <intProp name="ThreadGroup.num_threads">5</intProp>
+        <intProp name="ThreadGroup.ramp_time">10</intProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController">
+          <stringProp name="LoopController.loops">2</stringProp>
+        </elementProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="Health" enabled="true">
+          <stringProp name="HTTPSampler.domain">example.com</stringProp>
+          <stringProp name="HTTPSampler.protocol">https</stringProp>
+          <stringProp name="HTTPSampler.path">/health</stringProp>
+          <stringProp name="HTTPSampler.method">GET</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree/>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>"#;
+        tokio::fs::write(&path, jmx_content).await.expect("write jmx");
+        let plan = read_plan(&path).await.expect("read_plan should parse JMX");
+        assert_eq!(plan.name, "JMX IO Test");
+        assert_eq!(plan.thread_groups.len(), 1);
+        assert_eq!(plan.thread_groups[0].name, "Workers");
+        assert_eq!(plan.thread_groups[0].num_threads, 5);
+        assert_eq!(plan.thread_groups[0].requests.len(), 1);
+        assert_eq!(plan.thread_groups[0].requests[0].name, "Health");
     }
 
     #[tokio::test]
