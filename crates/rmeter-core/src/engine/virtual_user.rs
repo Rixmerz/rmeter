@@ -765,6 +765,94 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // evaluate_condition
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn condition_equality_pass() {
+        let vars = make_vars(&[("status", "ok")]);
+        assert!(evaluate_condition("${status} == \"ok\"", &vars));
+    }
+
+    #[test]
+    fn condition_equality_fail() {
+        let vars = make_vars(&[("status", "error")]);
+        assert!(!evaluate_condition("${status} == \"ok\"", &vars));
+    }
+
+    #[test]
+    fn condition_inequality_pass() {
+        let vars = make_vars(&[("status", "active")]);
+        assert!(evaluate_condition("${status} != \"inactive\"", &vars));
+    }
+
+    #[test]
+    fn condition_inequality_fail() {
+        let vars = make_vars(&[("status", "inactive")]);
+        assert!(!evaluate_condition("${status} != \"inactive\"", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_non_empty() {
+        let vars = make_vars(&[("token", "abc123")]);
+        assert!(evaluate_condition("${token}", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_empty_is_false() {
+        let vars = make_vars(&[("token", "")]);
+        assert!(!evaluate_condition("${token}", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_false_string_is_false() {
+        let vars = make_vars(&[("flag", "false")]);
+        assert!(!evaluate_condition("${flag}", &vars));
+    }
+
+    #[test]
+    fn condition_truthy_zero_is_false() {
+        let vars = make_vars(&[("count", "0")]);
+        assert!(!evaluate_condition("${count}", &vars));
+    }
+
+    #[test]
+    fn condition_unresolved_var_stays_truthy() {
+        let vars = HashMap::new();
+        // ${missing} stays as literal "${missing}" which is non-empty
+        assert!(evaluate_condition("${missing}", &vars));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_timer_delay
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn timer_constant_delay() {
+        let timer = Timer::Constant { delay_ms: 250 };
+        assert_eq!(compute_timer_delay(&timer), 250);
+    }
+
+    #[test]
+    fn timer_uniform_random_in_range() {
+        let timer = Timer::UniformRandom { min_ms: 100, max_ms: 200 };
+        for _ in 0..50 {
+            let delay = compute_timer_delay(&timer);
+            assert!(delay >= 100 && delay <= 200, "delay {} not in [100, 200]", delay);
+        }
+    }
+
+    #[test]
+    fn timer_gaussian_random_is_non_negative() {
+        let timer = Timer::GaussianRandom { deviation_ms: 100, offset_ms: 500 };
+        for _ in 0..50 {
+            let delay = compute_timer_delay(&timer);
+            // Gaussian can go below offset but we clamp to 0
+            assert!(delay <= 2000, "delay {} seems unreasonably high", delay);
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // to_send_request_input
     // -----------------------------------------------------------------------
 

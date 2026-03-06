@@ -734,6 +734,226 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Timer
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn timer_constant_serde_roundtrip() {
+        let timer = Timer::Constant { delay_ms: 500 };
+        let json = serde_json::to_string(&timer).unwrap();
+        assert!(json.contains("\"type\":\"constant\""));
+        let parsed: Timer = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Timer::Constant { delay_ms } => assert_eq!(delay_ms, 500),
+            _ => panic!("expected Constant"),
+        }
+    }
+
+    #[test]
+    fn timer_uniform_random_serde_roundtrip() {
+        let timer = Timer::UniformRandom { min_ms: 100, max_ms: 500 };
+        let json = serde_json::to_string(&timer).unwrap();
+        assert!(json.contains("\"type\":\"uniform_random\""));
+        let parsed: Timer = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Timer::UniformRandom { min_ms, max_ms } => {
+                assert_eq!(min_ms, 100);
+                assert_eq!(max_ms, 500);
+            }
+            _ => panic!("expected UniformRandom"),
+        }
+    }
+
+    #[test]
+    fn timer_gaussian_random_serde_roundtrip() {
+        let timer = Timer::GaussianRandom { deviation_ms: 200, offset_ms: 1000 };
+        let json = serde_json::to_string(&timer).unwrap();
+        assert!(json.contains("\"type\":\"gaussian_random\""));
+        let parsed: Timer = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Timer::GaussianRandom { deviation_ms, offset_ms } => {
+                assert_eq!(deviation_ms, 200);
+                assert_eq!(offset_ms, 1000);
+            }
+            _ => panic!("expected GaussianRandom"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ThreadGroupKind
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn thread_group_kind_default_is_normal() {
+        assert_eq!(ThreadGroupKind::default(), ThreadGroupKind::Normal);
+    }
+
+    #[test]
+    fn thread_group_kind_serde_roundtrip() {
+        for kind in [ThreadGroupKind::Normal, ThreadGroupKind::SetUp, ThreadGroupKind::TearDown] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let parsed: ThreadGroupKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn thread_group_kind_serialize_format() {
+        assert_eq!(serde_json::to_string(&ThreadGroupKind::Normal).unwrap(), "\"normal\"");
+        assert_eq!(serde_json::to_string(&ThreadGroupKind::SetUp).unwrap(), "\"set_up\"");
+        assert_eq!(serde_json::to_string(&ThreadGroupKind::TearDown).unwrap(), "\"tear_down\"");
+    }
+
+    // -----------------------------------------------------------------------
+    // HttpDefaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn http_defaults_serde_roundtrip() {
+        let defaults = HttpDefaults {
+            base_url: Some("https://api.example.com".to_string()),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("Authorization".to_string(), "Bearer tok".to_string());
+                h
+            },
+        };
+        let json = serde_json::to_string(&defaults).unwrap();
+        let parsed: HttpDefaults = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.base_url.as_deref(), Some("https://api.example.com"));
+        assert_eq!(parsed.headers["Authorization"], "Bearer tok");
+    }
+
+    #[test]
+    fn http_defaults_default_is_empty() {
+        let defaults = HttpDefaults::default();
+        assert!(defaults.base_url.is_none());
+        assert!(defaults.headers.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // TestElement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_element_request_serde_roundtrip() {
+        let elem = TestElement::Request {
+            request: HttpRequest {
+                id: Uuid::new_v4(),
+                name: "GET Home".to_string(),
+                method: HttpMethod::Get,
+                url: "http://example.com".to_string(),
+                headers: HashMap::new(),
+                body: None,
+                assertions: Vec::new(),
+                extractors: Vec::new(),
+                enabled: true,
+            },
+        };
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"request\""));
+        let _parsed: TestElement = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn test_element_if_controller_serde_roundtrip() {
+        let elem = TestElement::IfController {
+            id: Uuid::new_v4(),
+            name: "Check status".to_string(),
+            condition: "${status} == \"ok\"".to_string(),
+            children: vec![TestElement::Request {
+                request: HttpRequest {
+                    id: Uuid::new_v4(),
+                    name: "Nested".to_string(),
+                    method: HttpMethod::Get,
+                    url: "http://example.com/ok".to_string(),
+                    headers: HashMap::new(),
+                    body: None,
+                    assertions: Vec::new(),
+                    extractors: Vec::new(),
+                    enabled: true,
+                },
+            }],
+        };
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"if_controller\""));
+        assert!(json.contains("\"condition\""));
+        let parsed: TestElement = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TestElement::IfController { children, condition, .. } => {
+                assert_eq!(children.len(), 1);
+                assert!(condition.contains("status"));
+            }
+            _ => panic!("expected IfController"),
+        }
+    }
+
+    #[test]
+    fn test_element_loop_controller_serde_roundtrip() {
+        let elem = TestElement::LoopController {
+            id: Uuid::new_v4(),
+            name: "Repeat 3x".to_string(),
+            count: 3,
+            children: Vec::new(),
+        };
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"loop_controller\""));
+        let parsed: TestElement = serde_json::from_str(&json).unwrap();
+        match parsed {
+            TestElement::LoopController { count, .. } => assert_eq!(count, 3),
+            _ => panic!("expected LoopController"),
+        }
+    }
+
+    #[test]
+    fn test_element_transaction_controller_serde_roundtrip() {
+        let elem = TestElement::TransactionController {
+            id: Uuid::new_v4(),
+            name: "Login Flow".to_string(),
+            children: Vec::new(),
+        };
+        let json = serde_json::to_string(&elem).unwrap();
+        assert!(json.contains("\"type\":\"transaction_controller\""));
+        let _parsed: TestElement = serde_json::from_str(&json).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Backward compatibility — old JSON without new fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn thread_group_backward_compat_no_timer_no_kind_no_elements() {
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "Legacy TG",
+            "num_threads": 5,
+            "ramp_up_seconds": 10,
+            "loop_count": {"type": "finite", "count": 1},
+            "requests": [],
+            "enabled": true
+        }"#;
+        let tg: ThreadGroup = serde_json::from_str(json).unwrap();
+        assert!(tg.timer.is_none());
+        assert_eq!(tg.kind, ThreadGroupKind::Normal);
+        assert!(tg.elements.is_empty());
+    }
+
+    #[test]
+    fn test_plan_backward_compat_no_http_defaults() {
+        let json = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "Legacy Plan",
+            "description": "",
+            "thread_groups": [],
+            "variables": [],
+            "csv_data_sources": [],
+            "format_version": 1
+        }"#;
+        let plan: TestPlan = serde_json::from_str(json).unwrap();
+        assert!(plan.http_defaults.is_none());
+    }
+
+    // -----------------------------------------------------------------------
     // WebSocketStep / WebSocketRequest
     // -----------------------------------------------------------------------
 
