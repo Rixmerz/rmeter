@@ -199,8 +199,14 @@ pub fn evaluate_all(
 
 /// Replace all `${varName}` placeholders in `input` with values from `variables`.
 ///
-/// If a referenced variable is not found in the map, the placeholder is left
-/// as-is so callers can detect unresolved references if needed.
+/// Also evaluates JMeter-compatible functions:
+/// - `${__UUID()}` — generates a random UUID v4
+/// - `${__timeShift(format,,offset,,)}` — date/time with offset (e.g. `P30D`)
+/// - `${__time(format)}` — current date/time in the given format
+///
+/// If a referenced variable is not found in the map and is not a recognized
+/// function, the placeholder is left as-is so callers can detect unresolved
+/// references if needed.
 pub fn substitute_variables(input: &str, variables: &HashMap<String, String>) -> String {
     // Fast path: nothing to substitute.
     if !input.contains("${") {
@@ -208,50 +214,201 @@ pub fn substitute_variables(input: &str, variables: &HashMap<String, String>) ->
     }
 
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch == '$' {
-            if chars.peek() == Some(&'{') {
-                // Consume '{'.
-                chars.next();
-
-                // Collect variable name until '}'.
-                let mut var_name = String::new();
-                let mut closed = false;
-                for c in chars.by_ref() {
-                    if c == '}' {
-                        closed = true;
-                        break;
-                    }
-                    var_name.push(c);
-                }
-
-                if closed {
-                    // Replace with variable value if found; otherwise restore placeholder.
-                    if let Some(value) = variables.get(&var_name) {
-                        result.push_str(value);
-                    } else {
-                        result.push('$');
-                        result.push('{');
-                        result.push_str(&var_name);
-                        result.push('}');
-                    }
+    while i < len {
+        if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            // Try to extract the full ${...} expression, handling nested braces.
+            if let Some((expr, end)) = extract_placeholder(input, i + 2) {
+                // First resolve any nested ${...} inside the expression.
+                let resolved_expr = if expr.contains("${") {
+                    substitute_variables(&expr, variables)
                 } else {
-                    // Unclosed brace — restore what we consumed.
-                    result.push('$');
-                    result.push('{');
-                    result.push_str(&var_name);
+                    expr.clone()
+                };
+
+                // Try variable lookup first, then JMeter function evaluation.
+                if let Some(value) = variables.get(&resolved_expr) {
+                    result.push_str(value);
+                } else if let Some(value) = evaluate_jmeter_function(&resolved_expr) {
+                    result.push_str(&value);
+                } else {
+                    // Unresolved — keep the placeholder.
+                    result.push_str("${");
+                    result.push_str(&resolved_expr);
+                    result.push('}');
                 }
+                i = end;
             } else {
-                result.push(ch);
+                // Unclosed brace — keep the '$' and continue.
+                result.push('$');
+                i += 1;
             }
         } else {
-            result.push(ch);
+            result.push(bytes[i] as char);
+            i += 1;
         }
     }
 
     result
+}
+
+/// Extract a `${...}` expression starting after the `${`, handling nested braces.
+/// Returns `(content, end_index)` where `end_index` is the position after the closing `}`.
+fn extract_placeholder(input: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let len = bytes.len();
+    let mut depth = 1;
+    let mut i = start;
+
+    while i < len && depth > 0 {
+        if i + 1 < len && bytes[i] == b'$' && bytes[i + 1] == b'{' {
+            depth += 1;
+            i += 2;
+        } else if bytes[i] == b'}' {
+            depth -= 1;
+            if depth == 0 {
+                let content = input[start..i].to_string();
+                return Some((content, i + 1));
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    None
+}
+
+/// Evaluate a JMeter-style function expression.
+///
+/// Supported functions:
+/// - `__UUID()` — random UUID v4
+/// - `__timeShift(format,,offset,,)` — current time shifted by an ISO-8601 duration
+/// - `__time(format)` — current time in the given format
+fn evaluate_jmeter_function(expr: &str) -> Option<String> {
+    if expr == "__UUID()" {
+        return Some(uuid::Uuid::new_v4().to_string());
+    }
+
+    if let Some(args_str) = strip_function_call(expr, "__timeShift") {
+        let args: Vec<&str> = args_str.split(',').collect();
+        let format = args.first().copied().unwrap_or("yyyy-MM-dd");
+        let offset = args.get(2).copied().unwrap_or("");
+        return Some(evaluate_time_shift(format, offset));
+    }
+
+    if let Some(args_str) = strip_function_call(expr, "__time") {
+        let format = args_str.trim_matches(',').trim();
+        let format = if format.is_empty() { "yyyy-MM-dd" } else { format };
+        return Some(format_current_time(format));
+    }
+
+    None
+}
+
+/// Strip function name and parentheses from an expression like `__timeShift(args)`.
+fn strip_function_call<'a>(expr: &'a str, func_name: &str) -> Option<&'a str> {
+    let trimmed = expr.trim();
+    if trimmed.starts_with(func_name) {
+        let rest = &trimmed[func_name.len()..];
+        if rest.starts_with('(') && rest.ends_with(')') {
+            return Some(&rest[1..rest.len() - 1]);
+        }
+    }
+    None
+}
+
+/// Evaluate `__timeShift(format,,offset,,)` — returns current time + offset.
+///
+/// Supports a subset of ISO-8601 durations: `P30D`, `P1M`, `P1Y`, `P7D`, etc.
+/// Also supports negative offsets as JMeter variables that have already been
+/// resolved (e.g. `P-30D`).
+fn evaluate_time_shift(format: &str, offset: &str) -> String {
+    use chrono::{Duration, Utc};
+
+    let now = Utc::now();
+    let shifted = if offset.is_empty() {
+        now
+    } else {
+        parse_iso_duration_and_shift(now, offset)
+    };
+
+    format_chrono_time(format, shifted)
+}
+
+/// Format current time.
+fn format_current_time(format: &str) -> String {
+    format_chrono_time(format, chrono::Utc::now())
+}
+
+/// Parse a simple ISO-8601 duration and apply it to a datetime.
+fn parse_iso_duration_and_shift(
+    base: chrono::DateTime<chrono::Utc>,
+    duration_str: &str,
+) -> chrono::DateTime<chrono::Utc> {
+    use chrono::{Duration, Months};
+
+    let s = duration_str.trim();
+    let s = if s.starts_with('P') || s.starts_with('p') {
+        &s[1..]
+    } else {
+        // Not a valid duration, return base unchanged.
+        return base;
+    };
+
+    // Simple parser for PnD, PnM, PnY patterns.
+    let negative = s.starts_with('-');
+    let s = if negative { &s[1..] } else { s };
+
+    if s.ends_with('D') || s.ends_with('d') {
+        if let Ok(days) = s[..s.len() - 1].parse::<i64>() {
+            let days = if negative { -days } else { days };
+            return base + Duration::days(days);
+        }
+    } else if s.ends_with('M') || s.ends_with('m') {
+        if let Ok(months) = s[..s.len() - 1].parse::<u32>() {
+            if negative {
+                return base - Months::new(months);
+            } else {
+                return base + Months::new(months);
+            }
+        }
+    } else if s.ends_with('Y') || s.ends_with('y') {
+        if let Ok(years) = s[..s.len() - 1].parse::<u32>() {
+            let months = years * 12;
+            if negative {
+                return base - Months::new(months);
+            } else {
+                return base + Months::new(months);
+            }
+        }
+    }
+
+    base
+}
+
+/// Convert a JMeter-style date format to chrono output.
+///
+/// Common JMeter patterns:
+/// - `yyyy-MM-dd` → `2024-01-15`
+/// - `yyyyMMdd` → `20240115`
+/// - `yyyy-MM-dd'T'HH:mm:ss` → `2024-01-15T10:30:00`
+fn format_chrono_time(jmeter_fmt: &str, dt: chrono::DateTime<chrono::Utc>) -> String {
+    // Convert JMeter format tokens to chrono strftime tokens.
+    let chrono_fmt = jmeter_fmt
+        .replace("yyyy", "%Y")
+        .replace("MM", "%m")
+        .replace("dd", "%d")
+        .replace("HH", "%H")
+        .replace("mm", "%M")
+        .replace("ss", "%S")
+        .replace("SSS", "%3f")
+        .replace('\'', "");
+
+    dt.format(&chrono_fmt).to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -483,5 +640,57 @@ mod tests {
         let vars = HashMap::new();
         let result = substitute_variables("https://example.com/api", &vars);
         assert_eq!(result, "https://example.com/api");
+    }
+
+    // --- JMeter function tests ---
+
+    #[test]
+    fn substitute_uuid_function() {
+        let vars = HashMap::new();
+        let result = substitute_variables("id=${__UUID()}", &vars);
+        assert!(result.starts_with("id="));
+        let uuid_part = &result[3..];
+        // UUID v4 is 36 chars with hyphens: 8-4-4-4-12
+        assert_eq!(uuid_part.len(), 36);
+        assert!(uuid_part.contains('-'));
+    }
+
+    #[test]
+    fn substitute_time_function() {
+        let vars = HashMap::new();
+        let result = substitute_variables("date=${__time(yyyy-MM-dd)}", &vars);
+        assert!(result.starts_with("date="));
+        let date_part = &result[5..];
+        // Should be YYYY-MM-DD format
+        assert_eq!(date_part.len(), 10);
+        assert_eq!(date_part.as_bytes()[4], b'-');
+        assert_eq!(date_part.as_bytes()[7], b'-');
+    }
+
+    #[test]
+    fn substitute_time_shift_function() {
+        let vars = HashMap::new();
+        let result = substitute_variables("date=${__timeShift(yyyy-MM-dd,,P30D,,)}", &vars);
+        assert!(result.starts_with("date="));
+        let date_part = &result[5..];
+        assert_eq!(date_part.len(), 10);
+        assert_eq!(date_part.as_bytes()[4], b'-');
+    }
+
+    #[test]
+    fn substitute_nested_variable_in_function() {
+        let mut vars = HashMap::new();
+        vars.insert("first-date".to_string(), "P30D".to_string());
+        let result = substitute_variables("${__timeShift(yyyy-MM-dd,,${first-date},,)}", &vars);
+        // Should resolve the nested variable and evaluate timeShift
+        assert_eq!(result.len(), 10); // YYYY-MM-DD
+        assert_eq!(result.as_bytes()[4], b'-');
+    }
+
+    #[test]
+    fn substitute_time_shift_yyyymmdd_format() {
+        let vars = HashMap::new();
+        let result = substitute_variables("${__timeShift(yyyyMMdd,,P1D,,)}", &vars);
+        assert_eq!(result.len(), 8); // YYYYMMDD
     }
 }

@@ -24,6 +24,10 @@ pub enum AssertionRule {
     BodyNotContains { substring: String },
     /// Assert that a simple dot-notation JSON path evaluates to a specific value.
     JsonPath { expression: String, expected: serde_json::Value },
+    /// Assert that a JSON path exists in the response body (value can be anything).
+    JsonPathExists { expression: String },
+    /// Assert that a JSON path does NOT exist in the response body.
+    JsonPathNotExists { expression: String },
     /// Assert that the response time is below a threshold in milliseconds.
     ResponseTimeBelow { threshold_ms: u64 },
     /// Assert that a response header equals a specific value.
@@ -138,6 +142,46 @@ pub fn evaluate_assertion(rule: &AssertionRule, ctx: &ResponseContext) -> (bool,
                     }
                 }
                 Err(e) => (false, format!("Failed to parse response as JSON: {e}")),
+            }
+        }
+        AssertionRule::JsonPathExists { expression } => {
+            match serde_json::from_str::<serde_json::Value>(ctx.body) {
+                Ok(json) => {
+                    let actual = navigate_json_path(&json, expression);
+                    match actual {
+                        Some(_) => (
+                            true,
+                            format!("JSON path \"{}\" exists in response", expression),
+                        ),
+                        None => (
+                            false,
+                            format!("JSON path \"{}\" not found in response", expression),
+                        ),
+                    }
+                }
+                Err(e) => (false, format!("Failed to parse response as JSON: {e}")),
+            }
+        }
+        AssertionRule::JsonPathNotExists { expression } => {
+            match serde_json::from_str::<serde_json::Value>(ctx.body) {
+                Ok(json) => {
+                    let actual = navigate_json_path(&json, expression);
+                    match actual {
+                        Some(_) => (
+                            false,
+                            format!("JSON path \"{}\" should not exist but was found", expression),
+                        ),
+                        None => (
+                            true,
+                            format!("JSON path \"{}\" does not exist (as expected)", expression),
+                        ),
+                    }
+                }
+                // If we can't parse as JSON, the path definitely doesn't exist.
+                Err(_) => (
+                    true,
+                    format!("Response is not JSON; path \"{}\" does not exist", expression),
+                ),
             }
         }
         AssertionRule::ResponseTimeBelow { threshold_ms } => {
@@ -527,6 +571,50 @@ mod tests {
         let (passed, msg) = evaluate_assertion(&rule, &ctx);
         assert!(!passed);
         assert!(msg.contains("not found"));
+    }
+
+    #[test]
+    fn json_path_exists_pass() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, r#"{"data":{"id":42}}"#, 50);
+        let rule = AssertionRule::JsonPathExists {
+            expression: "data.id".to_string(),
+        };
+        let (passed, _) = evaluate_assertion(&rule, &ctx);
+        assert!(passed);
+    }
+
+    #[test]
+    fn json_path_exists_fail() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, r#"{"data":{"id":42}}"#, 50);
+        let rule = AssertionRule::JsonPathExists {
+            expression: "errors".to_string(),
+        };
+        let (passed, _) = evaluate_assertion(&rule, &ctx);
+        assert!(!passed);
+    }
+
+    #[test]
+    fn json_path_not_exists_pass() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, r#"{"data":{"id":42}}"#, 50);
+        let rule = AssertionRule::JsonPathNotExists {
+            expression: "errors".to_string(),
+        };
+        let (passed, _) = evaluate_assertion(&rule, &ctx);
+        assert!(passed);
+    }
+
+    #[test]
+    fn json_path_not_exists_fail() {
+        let headers = HashMap::new();
+        let ctx = make_ctx(200, &headers, r#"{"errors":[{"message":"bad"}]}"#, 50);
+        let rule = AssertionRule::JsonPathNotExists {
+            expression: "errors".to_string(),
+        };
+        let (passed, _) = evaluate_assertion(&rule, &ctx);
+        assert!(!passed);
     }
 
     #[test]
