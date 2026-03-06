@@ -748,20 +748,56 @@ fn parse_json_path_assertion(node: &XmlNode) -> Option<Assertion> {
         .find_string_prop("EXPECTED_VALUE")
         .unwrap_or_default();
     let invert = node.find_bool_prop("INVERT").unwrap_or(false);
-    let is_regex = node.find_bool_prop("ISREGEX").unwrap_or(true);
-    let expect_null = node.find_bool_prop("EXPECT_NULL").unwrap_or(false);
+
+    // Strip the leading "$." from JMeter JSON paths to match rmeter's
+    // dot-notation navigator (e.g. "$.errors" → "errors",
+    // "$.data.items[0].id" → "data.items[0].id").
+    let expression = if json_path.starts_with("$.") {
+        json_path[2..].to_string()
+    } else if json_path == "$" {
+        String::new()
+    } else {
+        json_path.clone()
+    };
+
+    // Map to the appropriate rmeter assertion rule:
+    //  - invert + empty expected → JsonPathNotExists (path must NOT exist)
+    //  - !invert + empty expected → JsonPathExists (path must exist)
+    //  - !invert + non-empty expected → JsonPath (path must equal expected)
+    let rule = if invert && expected.is_empty() {
+        serde_json::json!({
+            "type": "json_path_not_exists",
+            "expression": expression,
+        })
+    } else if !invert && expected.is_empty() {
+        serde_json::json!({
+            "type": "json_path_exists",
+            "expression": expression,
+        })
+    } else if invert {
+        // invert + expected value → assert path does NOT equal value
+        // rmeter doesn't have a "not equals" variant, so approximate with
+        // BodyNotContains of the expected value.
+        serde_json::json!({
+            "type": "body_not_contains",
+            "substring": expected,
+        })
+    } else {
+        // !invert + expected value → JsonPath equals check
+        // Try to parse the expected value as JSON; fall back to string.
+        let expected_value = serde_json::from_str::<serde_json::Value>(&expected)
+            .unwrap_or_else(|_| serde_json::Value::String(expected.clone()));
+        serde_json::json!({
+            "type": "json_path",
+            "expression": expression,
+            "expected": expected_value,
+        })
+    };
 
     Some(Assertion {
         id: Uuid::new_v4(),
         name,
-        rule: serde_json::json!({
-            "type": "json_path",
-            "json_path": json_path,
-            "expected_value": expected,
-            "invert": invert,
-            "is_regex": is_regex,
-            "expect_null": expect_null,
-        }),
+        rule,
     })
 }
 
@@ -798,15 +834,72 @@ fn parse_response_assertion(node: &XmlNode) -> Option<Assertion> {
         }
     }
 
-    Some(Assertion {
-        id: Uuid::new_v4(),
-        name,
-        rule: serde_json::json!({
-            "type": "response",
-            "test_field": test_field,
-            "test_strings": test_strings,
-        }),
-    })
+    // Map to rmeter assertion rules. JMeter response assertions check that
+    // the response body contains (or not) certain strings.
+    // test_type bitmask: 2 = contains, 1 = matches, 8 = equals, 16 = substring
+    // bit 2 of test_type = NOT
+    let test_type: i32 = node
+        .find_string_prop("Assertion.test_type")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2); // default: contains
+
+    let is_not = (test_type & 4) != 0;
+
+    // For the response body field, map each test string to a BodyContains or BodyNotContains.
+    // We use the first test string since rmeter assertions are 1:1.
+    if test_field.contains("response_data") || test_field.contains("response_body") {
+        let substring = test_strings.into_iter().next().unwrap_or_default();
+        let rule = if is_not {
+            serde_json::json!({
+                "type": "body_not_contains",
+                "substring": substring,
+            })
+        } else {
+            serde_json::json!({
+                "type": "body_contains",
+                "substring": substring,
+            })
+        };
+        Some(Assertion {
+            id: Uuid::new_v4(),
+            name,
+            rule,
+        })
+    } else if test_field.contains("response_code") {
+        // Status code assertion
+        let code_str = test_strings.into_iter().next().unwrap_or_default();
+        if let Ok(code) = code_str.parse::<u16>() {
+            let rule = if is_not {
+                serde_json::json!({
+                    "type": "status_code_not_equals",
+                    "not_expected": code,
+                })
+            } else {
+                serde_json::json!({
+                    "type": "status_code_equals",
+                    "expected": code,
+                })
+            };
+            Some(Assertion {
+                id: Uuid::new_v4(),
+                name,
+                rule,
+            })
+        } else {
+            None
+        }
+    } else {
+        // Fallback: body contains
+        let substring = test_strings.into_iter().next().unwrap_or_default();
+        Some(Assertion {
+            id: Uuid::new_v4(),
+            name,
+            rule: serde_json::json!({
+                "type": "body_contains",
+                "substring": substring,
+            }),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -824,9 +917,19 @@ fn parse_json_post_processor(node: &XmlNode) -> Option<Extractor> {
     let json_path = node
         .find_string_prop("JSONPostProcessor.jsonPathExprs")
         .unwrap_or_default();
-    let match_number = node
-        .find_string_prop("JSONPostProcessor.match_numbers")
-        .unwrap_or_default();
+
+    // Strip leading "$." from JMeter JSON paths for rmeter's dot-notation
+    // navigator (e.g. "$.data.items[0].id" → "data.items[0].id").
+    let expression = {
+        let trimmed = json_path.trim();
+        if trimmed.starts_with("$.") {
+            trimmed[2..].to_string()
+        } else if trimmed == "$" {
+            String::new()
+        } else {
+            trimmed.to_string()
+        }
+    };
 
     Some(Extractor {
         id: Uuid::new_v4(),
@@ -834,8 +937,7 @@ fn parse_json_post_processor(node: &XmlNode) -> Option<Extractor> {
         variable,
         expression: serde_json::json!({
             "type": "json_path",
-            "json_path": json_path.trim(),
-            "match_number": match_number,
+            "expression": expression,
         }),
     })
 }
@@ -858,9 +960,14 @@ fn parse_regex_extractor(node: &XmlNode) -> Option<Extractor> {
     let template = node
         .find_string_prop("RegexExtractor.template")
         .unwrap_or_else(|| "$1$".to_string());
-    let match_number = node
-        .find_string_prop("RegexExtractor.match_nr")
-        .unwrap_or_default();
+
+    // JMeter template "$1$" means capture group 1.
+    // Parse the group number from the template pattern "$N$".
+    let group: u32 = template
+        .trim_start_matches('$')
+        .trim_end_matches('$')
+        .parse()
+        .unwrap_or(1);
 
     Some(Extractor {
         id: Uuid::new_v4(),
@@ -868,9 +975,8 @@ fn parse_regex_extractor(node: &XmlNode) -> Option<Extractor> {
         variable,
         expression: serde_json::json!({
             "type": "regex",
-            "regex": regex,
-            "template": template,
-            "match_number": match_number,
+            "pattern": regex,
+            "group": group,
         }),
     })
 }
